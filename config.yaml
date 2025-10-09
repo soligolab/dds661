@@ -1,0 +1,39 @@
+
+# Example configuration for dds661_mqtt.py
+
+serial:
+  port: /dev/ttyUSB0
+  baudrate: 9600
+  parity: E         # E, O, N (must match device setting)
+  stopbits: 1
+  bytesize: 8
+  timeout: 1.0
+
+mqtt:
+  host: 192.168.1.6
+  port: 1883
+  username: mqttuser
+  password: mqttpass
+  client_id: dds661-bridge
+  base_topic: dds661
+  tls: false
+  retain: false
+  keepalive: 30
+
+homeassistant:
+  enabled: true
+  discovery_prefix: homeassistant
+  # area: "Quadro elettrico"  # optional metadata
+
+polling:
+  interval_s: 1.0
+
+devices:
+  - id: 10
+    name: "Contatore Cucina"
+  - id: 11
+    name: "Contatore PompaCalore"
+  - id: 12
+    name: "Contatore Giardino"
+  - id: 13
+    name: "Contatore Rack"
