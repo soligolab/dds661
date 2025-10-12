@@ -1,10 +1,9 @@
-
-# Example configuration for dds661_mqtt.py
+# Configuration for dds661_polling.py
 
 serial:
   port: /dev/ttyUSB0
   baudrate: 9600
-  parity: E         # E, O, N (must match device setting)
+  parity: E           # E, O, N (must match device setting)
   stopbits: 1
   bytesize: 8
   timeout: 1.0
@@ -12,21 +11,27 @@ serial:
 mqtt:
   host: 192.168.1.6
   port: 1883
+  client_id: dds661-bridge
   username: mqttuser
   password: mqttpass
-  client_id: dds661-bridge
-  base_topic: dds661
-  tls: false
-  retain: false
   keepalive: 30
+  base_topic: dds661
+  topic_style: measurements    # flat | state | measurements
+  qos: 0
+  retain: true
+  tls: false           # true | false | or dict: {enabled: true, ca_certs: ..., certfile: ..., keyfile: ...}
 
-homeassistant:
+home_assistant:
   enabled: true
   discovery_prefix: homeassistant
-  # area: "Quadro elettrico"  # optional metadata
+  # area: "Quadro elettrico"   # optional
 
 polling:
   interval_s: 1.0
+  read_mode: sequential        # sequential | bulk
+  per_measure_delay_ms: 80     # delay between individual register reads
+  delay_ms_between_devices: 80 # delay between devices
+  debug_log: false              # print per-device JSON measurements to console
 
 devices:
   - id: 10

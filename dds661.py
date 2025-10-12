@@ -1,30 +1,17 @@
 
 # dds661.py
-# High-level library for DDS661 Modbus RTU meter.
+# High-level library for DDS661 Modbus RTU meter (pymodbus-version agnostic).
 #
-# - Encodes/decodes IEEE-754 float32 across two 16-bit Modbus registers
-# - Word/byte order: High word -> Low word (ABCD) i.e. Endian.BIG for both
-#
-# Public API:
-#   - LinkConfig: serial link configuration (dataclass)
-#   - Params: device parameters (dataclass)
-#   - Measurements: device measurements (dataclass)
-#   - DDS661: class with high-level methods:
-#       * read_params() -> Params
-#       * write_params(baud=None, parity=None, slave=None) -> dict
-#       * read_measurements() -> Measurements
-#
-# Notes:
-#   - Device parity values (holding register 0x0002): 0=Even, 1=Odd, 2=None
-#   - Pymodbus >= 3.x is required
+# - Uses struct for float32 <-> 2x16bit registers (ABCD: high word then low word).
+# - Compatible with pymodbus variants that use either method="rtu" or framer=ModbusRtuFramer.
+# - Automatically handles slave/unit kwarg differences in read/write calls.
 
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Optional, Dict, Tuple
+from typing import Optional, Dict, Tuple, Any, Callable
+import struct
 
 from pymodbus.client import ModbusSerialClient
-from pymodbus.constants import Endian
-from pymodbus.payload import BinaryPayloadBuilder, BinaryPayloadDecoder
 from pymodbus.exceptions import ModbusException
 
 # ---------------- Register map (addresses are the High Word) ---------------
@@ -40,9 +27,6 @@ IN_FREQ    = 0x0036  # float32
 IN_E_TOT   = 0x0100  # float32
 IN_E_POS   = 0x0102  # float32
 IN_E_REV   = 0x0103  # float32
-
-WORD_ORDER = Endian.BIG   # High word first (ABCD)
-BYTE_ORDER = Endian.BIG   # Big-endian inside each word
 
 # ------------------------------- Dataclasses -------------------------------
 
@@ -75,30 +59,39 @@ class Measurements:
 # -------------------------- Float <-> Registers ----------------------------
 
 def _float_to_registers(value: float) -> Tuple[int, int]:
-    b = BinaryPayloadBuilder(byteorder=BYTE_ORDER, wordorder=WORD_ORDER)
-    b.add_32bit_float(float(value))
-    r = b.to_registers()
-    return r[0], r[1]
+    b = struct.pack('>f', float(value))  # big-endian float32: b0 b1 b2 b3
+    hi = (b[0] << 8) | b[1]
+    lo = (b[2] << 8) | b[3]
+    return hi, lo
 
 def _registers_to_float(regs: Tuple[int, int]) -> float:
-    dec = BinaryPayloadDecoder.fromRegisters(list(regs), byteorder=BYTE_ORDER, wordorder=WORD_ORDER)
-    return dec.decode_32bit_float()
+    hi, lo = int(regs[0]) & 0xFFFF, int(regs[1]) & 0xFFFF
+    b = bytes([(hi >> 8) & 0xFF, hi & 0xFF, (lo >> 8) & 0xFF, lo & 0xFF])
+    return struct.unpack('>f', b)[0]
+
+# ---------------------- pymodbus compat (slave/unit) -----------------------
+
+def _call_with_unit(func: Callable[..., Any], *, address: int, count: int, unit_id: int):
+    try:
+        return func(address=address, count=count, slave=unit_id)
+    except TypeError:
+        return func(address=address, count=count, unit=unit_id)
+
+def _write_with_unit(func: Callable[..., Any], *, address: int, values: list[int], unit_id: int):
+    try:
+        return func(address=address, values=values, slave=unit_id)
+    except TypeError:
+        return func(address=address, values=values, unit=unit_id)
 
 # --------------------------------- Client ----------------------------------
 
 class DDS661:
-    """
-    High-level client for the DDS661 meter.
-    Opens and closes the serial client on each public call to keep usage simple.
-    """
     def __init__(self, link: LinkConfig, unit: int = 1):
         self.link = link
         self.unit = int(unit)
 
-    # ---- internals ----
     def _make_client(self) -> ModbusSerialClient:
-        return ModbusSerialClient(
-            method="rtu",
+        kwargs = dict(
             port=self.link.port,
             baudrate=self.link.baudrate,
             parity=self.link.parity,
@@ -106,6 +99,27 @@ class DDS661:
             bytesize=self.link.bytesize,
             timeout=self.link.timeout,
         )
+        # Prefer new-style framer if available
+        RTUFramer = None
+        try:
+            from pymodbus.framer.rtu_framer import ModbusRtuFramer as RTUFramer  # newer
+        except Exception:
+            try:
+                from pymodbus.framer.rtu import ModbusRtuFramer as RTUFramer      # older 3.x
+            except Exception:
+                RTUFramer = None
+        # Try modern constructor
+        if RTUFramer is not None:
+            try:
+                return ModbusSerialClient(framer=RTUFramer, **kwargs)
+            except TypeError:
+                pass
+        # Fallback to legacy method="rtu"
+        try:
+            return ModbusSerialClient(method="rtu", **kwargs)
+        except TypeError:
+            # Last resort: no framer/method argument accepted
+            return ModbusSerialClient(**kwargs)
 
     # ---- params ----
     def read_params(self) -> Params:
@@ -114,7 +128,7 @@ class DDS661:
             raise RuntimeError("Impossibile aprire la porta seriale")
         try:
             def _r(addr: int) -> float:
-                rr = cli.read_holding_registers(address=addr, count=2, slave=self.unit)
+                rr = _call_with_unit(cli.read_holding_registers, address=addr, count=2, unit_id=self.unit)
                 if rr.isError():
                     raise ModbusException(rr)
                 return _registers_to_float((rr.registers[0], rr.registers[1]))
@@ -129,10 +143,6 @@ class DDS661:
     def write_params(self, baud: Optional[float] = None,
                      parity: Optional[float] = None,
                      slave: Optional[float] = None) -> Dict[str, str]:
-        """
-        Selectively write parameters that are not None and differ from current.
-        Write order: slave -> parity -> baud
-        """
         cur = self.read_params()
         plan = [("slave", REG_SLAVE, slave), ("parity", REG_PARITY, parity), ("baud", REG_BAUD, baud)]
 
@@ -151,12 +161,11 @@ class DDS661:
                     report[name] = f"unchanged ({desired})"
                     continue
                 hi, lo = _float_to_registers(float(desired))
-                rq = cli.write_registers(address=addr, values=[hi, lo], slave=self.unit)
+                rq = _write_with_unit(cli.write_registers, address=addr, values=[hi, lo], unit_id=self.unit)
                 if rq.isError():
                     report[name] = f"ERROR: {rq}"
                 else:
                     report[name] = f"written ({desired})"
-                    # update local state if we changed the unit id
                     if name == "slave":
                         self.unit = int(desired)
             return report
@@ -170,7 +179,7 @@ class DDS661:
             raise RuntimeError("Impossibile aprire la porta seriale")
         try:
             def _rin(addr: int) -> float:
-                rr = cli.read_input_registers(address=addr, count=2, slave=self.unit)
+                rr = _call_with_unit(cli.read_input_registers, address=addr, count=2, unit_id=self.unit)
                 if rr.isError():
                     return float("nan")
                 return _registers_to_float((rr.registers[0], rr.registers[1]))
