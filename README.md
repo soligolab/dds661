@@ -1,226 +1,63 @@
-# DDS661 — Modbus RTU Tools
-Utilities and a small library to read **measurements** and read/write **parameters** of **DDS661** energy meters over **Modbus‑RTU** (RS‑485).
+# Generic Modbus Meters (DDS661 + SDM230)
 
-Tools included:
-- `modbus_meter.py` — one‑shot CLI and importable module to **read** measurements and **read/write** parameters.
-- `dds661_polling.py` — daemon‑style poller that periodically reads one or more meters and **publishes to MQTT** (optional **Home Assistant discovery**).
+Tooling per leggere/scrivere **DDS661** e **Eastron SDM230** via Modbus RTU con pubblicazione MQTT e discovery per Home Assistant.
 
-> Data encoding on the device is **IEEE‑754 float32**, using **2 registers per value** with **big‑endian word + big‑endian byte** order (ABCD).
+## File
+- `dds661.py` — driver DDS661
+- `sdm230.py` — driver SDM230 (float32 su 2 registri, MSW first)
+- `polling.py` — poller multi-dispositivo → MQTT/HA
+- `meter.py` — CLI per singolo device (lettura/scrittura)
+- `config.yaml` — configurazione
 
----
-
-## Features
-- Read **Input Registers** (0x04): Voltage, Current, Active Power, Power Factor, Frequency, Energies (total/import/export).
-- Read/Write **Holding Registers** (0x03/0x10): baud rate, parity, slave address.
-- CLI + Python API; YAML configuration supported.
-- MQTT publishing with **name‑based topics** and configurable layout.
-- Robust sequential read mode with per‑measurement and inter‑device delays for noisy/slow buses.
-- Optional Home Assistant Discovery (sensors auto‑created).
-
----
-
-## Installation
+## Requisiti
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -U pip
 pip install "pymodbus>=3,<4" pyserial paho-mqtt pyyaml
 ```
 
-Optional `requirements.txt`:
-```
-pymodbus>=3,<4
-pyserial
-paho-mqtt
-pyyaml
-```
+## Configurazione (adattata al tuo setup)
+Vedi `config.yaml` incluso. Differenze rispetto al file storico:
+- `polling.period_s` sostituisce `polling.interval_s` (qui impostato a **1.0** secondi).
+- Aggiunto SDM230 con `id: 1` e `name: "Contatore F.M"`.
+- Gli altri dispositivi (`10..13`) sono marcati `type: dds661`.
 
----
+> L’abbinamento **ID ↔ tipo** strumento è ora nel blocco `devices:` del config. In futuro basta aggiungere nuovi oggetti con `type:` del driver.
 
-## Configuration (YAML)
-Create `config.yaml` and adjust to your hardware. Example:
-
-```yaml
-serial:
-  port: /dev/ttyCOM1
-  baudrate: 9600
-  parity: E           # E, O, N (must match the device)
-  stopbits: 1
-  bytesize: 8
-  timeout: 1.0
-
-mqtt:
-  host: 192.168.1.6
-  port: 1883
-  client_id: dds661-bridge
-  username: mqttuser
-  password: mqttpass
-  keepalive: 30
-  base_topic: dds661
-  topic_style: flat    # flat | state | measurements
-  qos: 0
-  retain: true
-  tls: false           # true | false | or dict: {enabled: true, ca_certs: ..., certfile: ..., keyfile: ...}
-
-home_assistant:
-  enabled: true
-  discovery_prefix: homeassistant
-  # area: "Quadro elettrico"   # optional
-
-polling:
-  interval_s: 1.0
-  read_mode: sequential        # sequential | bulk
-  per_measure_delay_ms: 80     # delay between individual register reads
-  delay_ms_between_devices: 80 # delay between devices on the bus
-  debug_log: true              # print per-device JSON measurements
-
-devices:
-  - id: 10
-    name: "Contatore Cucina"
-  - id: 11
-    name: "Contatore PompaCalore"
-  - id: 12
-    name: "Contatore Giardino"
-  - id: 13
-    name: "Contatore Rack"
-```
-
-**Notes**
-- `mqtt.topic_style` controls the topic layout:
-  - `flat` → `<base>/<slug>`
-  - `state` → `<base>/<slug>/state`
-  - `measurements` → `<base>/<slug>/measurements`
-- A device name like `"Contatore Cucina"` is slugified to `contatore-cucina`.
-- Availability/LWT is always `<base>/status` (`online`/`offline`).
-
----
-
-## modbus_meter.py — one‑shot CLI
-
-### Read measurements (and parameters) using config
+## Esecuzione — Poller MQTT
+One-shot:
 ```bash
-python3 modbus_meter.py --config config.yaml --slave 11 read
+python3 polling.py --config config.yaml --oneshot
 ```
-
-### Read using explicit serial options
+Loop continuo:
 ```bash
-python3 modbus_meter.py --port /dev/ttyCOM1 --baudrate 9600 --parity E --slave 11 read
+python3 polling.py --config config.yaml
 ```
 
-### Change Modbus slave ID
+### Topic MQTT
+Per ogni device:
+```
+<base_topic>/<slug_name_o_id>/state
+```
+Payload JSON con: `voltage`, `current`, `p_active`, `pf`, `freq`, `e_total`, `e_pos`, `e_rev`.
+
+> `mqtt.topic_style` è informativo al momento; la pubblicazione standard usa sempre `/state`.
+
+## Esecuzione — CLI singolo device
+Con risoluzione del tipo dal config (via `id`):
 ```bash
-# connect with current ID 10
-python3 modbus_meter.py --config config.yaml --slave 10 write --slave-new 11
-# verify
-python3 modbus_meter.py --config config.yaml --slave 11 read
+python3 meter.py --config config.yaml --slave 1 read
 ```
-
-### Change device parity (0=Even, 1=Odd, 2=None)
+Forza il driver senza config:
 ```bash
-python3 modbus_meter.py --config config.yaml --slave 11 write --parity-new 2
-# then reconnect with --parity N
-python3 modbus_meter.py --port /dev/ttyCOM1 --baudrate 9600 --parity N --slave 11 read
+python3 meter.py --port /dev/ttyUSB0 --baudrate 9600 --parity E --slave 1 --type sdm230 read
 ```
 
-### Example output
-```json
-{
-  "params": { "baud": 9600.0, "parity": 0.0, "slave": 11.0 },
-  "measurements": {
-    "voltage": 238.6, "current": 0.033, "p_active": 0.0, "pf": 1.0, "freq": 50.0,
-    "e_total": 0.02, "e_pos": 0.02, "e_rev": -151732604633088.0
-  }
-}
-```
-
----
-
-## dds661_polling.py — MQTT poller
-
-Continuously polls all `devices` in the YAML and publishes a JSON payload per device.
-
-### Run
+Scrittura parametri (es. SDM230):
 ```bash
-# normal daemon-style
-python3 dds661_polling.py --config config.yaml
-
-# one cycle + debug JSON logs
-python3 dds661_polling.py --config config.yaml --oneshot --debug-read --log-level INFO
+# baud come valore reale (1200/2400/4800/9600); parity è codice device:
+# 0=N/1stop, 1=E/1stop, 2=O/1stop, 3=N/2stop
+python3 meter.py --config config.yaml --slave 1 write --baud 9600 --parity-new 0
 ```
-
-### Topics
-Given `base_topic: dds661` and `name: "Contatore Cucina"`:
-- With `topic_style: flat` → `dds661/contatore-cucina`
-- With `topic_style: state` → `dds661/contatore-cucina/state`
-- With `topic_style: measurements` → `dds661/contatore-cucina/measurements`
-- Availability (LWT): `dds661/status`
-
-### Payload (single topic per device)
-```json
-{
-  "id": 10,
-  "name": "Contatore Cucina",
-  "voltage": 239.0,
-  "current": 0.03,
-  "p_active": 0.0,
-  "pf": 1.0,
-  "freq": 50.0,
-  "e_total": 0.019,
-  "e_pos": 0.0199,
-  "e_rev": -15173
-}
-```
-
-### Reliability knobs
-- `polling.read_mode: sequential` — reads one register group at a time.
-- `polling.per_measure_delay_ms` — pause between measurement reads (50–100 ms typical).
-- `polling.delay_ms_between_devices` — pause between devices (80–150 ms typical).
-- `polling.debug_log: true` — prints a per‑device JSON block and step‑by‑step values.
-
-### Home Assistant discovery
-If `home_assistant.enabled: true`, the poller publishes discovery configs under
-`<discovery_prefix>/sensor/.../config`, with `state_topic` set to the name‑based topic and `availability` pointing to `<base>/status`.
-Sensors exposed: `voltage`, `current`, `p_active`, `pf`, `freq`, `e_total`, `e_pos`, `e_rev`.
-
----
-
-## Register Map (reference)
-
-> Each value is a **float32** → **2 Modbus registers** (4 bytes). Address below is **High Word**.
-
-### Measurements — Input Registers (0x04)
-| Address (Hex) | Len | Type    | Description                 | Unit |
-|--------------:|:---:|---------|-----------------------------|:----:|
-| 0x0000        |  2  | float32 | Voltage                     |  V   |
-| 0x0008        |  2  | float32 | Current                     |  A   |
-| 0x0012        |  2  | float32 | Active power                |  kW  |
-| 0x002A        |  2  | float32 | Power factor (cosφ)         |  —   |
-| 0x0036        |  2  | float32 | Frequency                   |  Hz  |
-| 0x0100        |  2  | float32 | Total active energy         | kWh  |
-| 0x0102        |  2  | float32 | Positive active energy      | kWh  |
-| 0x0103        |  2  | float32 | Reverse active energy       | kWh  |
-
-### Parameters — Holding Registers (0x03/0x10)
-| Address (Hex) | Len | Type    | Parameter            | Allowed values            |
-|--------------:|:---:|---------|----------------------|---------------------------|
-| 0x0000        |  2  | float32 | Baud rate            | 1200, 2400, 4800, **9600** |
-| 0x0002        |  2  | float32 | Parity               | **0=Even**, 1=Odd, 2=None |
-| 0x0008        |  2  | float32 | Modbus slave address | 1…247                     |
-
-**Implementation details**
-- Always request `count=2` registers per float.
-- Word/byte order: **big‑endian/high‑word‑first** (ABCD). In `pymodbus`: `byteorder=Endian.BIG`, `wordorder=Endian.BIG`.
-
----
 
 ## Troubleshooting
-- `NaN` values on some reads → use `read_mode: sequential` and tune `per_measure_delay_ms` and `delay_ms_between_devices`.
-- No response → verify wiring, slave ID, and serial line (`baudrate`, `parity`). Try:  
-  `python3 modbus_meter.py --port /dev/ttyCOM1 --baudrate 9600 --parity E --slave <id> read`
-- Permission denied on `/dev/tty*` → add user to `dialout` (or run as root for a quick test).
-- MQTT not connecting → check `host`, `port`, credentials, and `tls` settings. If `tls: true`, server must accept TLS on that port.
-
----
-
-## License
-MIT (or adapt to your project policy).
+- **NaN nelle misure** → controlla baud/parità/stop, terminazioni, ID corretto; le misure usano gli **input registers** (0x04).
+- **MQTT** → verifica host/porta/credenziali/TLS; gestione compatibile Paho v1/v2.
