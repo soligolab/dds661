@@ -51,3 +51,9 @@ devices:
   - id: 13
     type: dds661
     name: "Contatore Rack"
+
+# Global Modbus TCP defaults (transparent bridge CNV520-21AD)
+tcp:
+  host: 192.168.0.99
+  port: 502
+  timeout: 1.0

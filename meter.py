@@ -24,8 +24,16 @@ try:
 except Exception:
     _HAS_YAML = False
 
-from dds661 import DDS661, LinkConfig
-from sdm230 import SDM230
+from dds661 import DDS661, LinkConfig, IN_VOLTAGE as D_VOLT, IN_CURRENT as D_CURR, IN_P_ACT as D_PACT, IN_PF as D_PF, IN_FREQ as D_FREQ, IN_E_TOT as D_ETOT, IN_E_POS as D_EPOS, IN_E_REV as D_EREV
+from sdm230 import SDM230, IN_VOLTAGE as S_VOLT, IN_CURRENT as S_CURR, IN_P_ACT as S_PACT, IN_PF as S_PF, IN_FREQ as S_FREQ, IN_E_TOT as S_ETOT, IN_E_POS as S_EPOS, IN_E_REV as S_EREV
+
+try:
+    from pymodbus.client import ModbusTcpClient
+except Exception:
+    try:
+        from pymodbus.client.sync import ModbusTcpClient  # type: ignore
+    except Exception:
+        ModbusTcpClient = None  # type: ignore
 
 def _load_config(path: str) -> dict:
     if not _HAS_YAML:
@@ -51,6 +59,27 @@ def _link_from_cfg_and_args(args, cfg: dict | None) -> LinkConfig:
     if args.timeout is not None: kw["timeout"] = args.timeout
     return LinkConfig(**kw)
 
+
+def _tcp_from_cfg(args, cfg: dict|None, unit: int) -> dict:
+    g = (cfg.get("tcp") or {}) if isinstance(cfg, dict) else {}
+    d = {}
+    if cfg:
+        for dev in (cfg.get("devices") or []):
+            try:
+                if int(dev.get("id")) == int(unit):
+                    d = dev.get("tcp") or {}
+                    break
+            except Exception:
+                continue
+    t = dict(g); t.update(d)
+    if args.host: t["host"] = args.host
+    if args.port_tcp: t["port"] = args.port_tcp
+    t.setdefault("host", "192.168.0.99")
+    t.setdefault("port", 502)
+    t.setdefault("timeout", 1.0)
+    return t
+
+
 def _resolve_type(args, cfg: dict | None) -> str:
     if args.type:
         return args.type.lower()
@@ -63,6 +92,20 @@ def _resolve_type(args, cfg: dict | None) -> str:
             except Exception:
                 continue
     return "dds661"
+
+
+def _resolve_protocol(args, cfg: dict|None, unit: int) -> str:
+    if args.protocol:
+        return args.protocol.lower()
+    if cfg:
+        for d in (cfg.get("devices") or []):
+            try:
+                if int(d.get("id")) == int(unit):
+                    return str(d.get("protocol","rtu")).lower()
+            except Exception:
+                continue
+    return "rtu"
+
 
 def main():
     ap = argparse.ArgumentParser(description="Generic Modbus RTU CLI (DDS661, SDM230).")
@@ -78,6 +121,9 @@ def main():
 
     ap.add_argument("--slave", type=int, default=1, help="Current Modbus unit ID")
     ap.add_argument("--type", choices=["dds661", "sdm230"], help="Override meter type (default is read from config)")
+    ap.add_argument("--protocol", choices=["rtu","tcp"], default=None, help="Transport: rtu (default) or tcp")
+    ap.add_argument("--host", default=None, help="TCP host (overrides config.tcp.host)")
+    ap.add_argument("--port-tcp", type=int, default=None, help="TCP port (overrides config.tcp.port; default 502)")
 
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("read", help="Read params (holding) and main measurements (input).")
@@ -92,6 +138,44 @@ def main():
     cfg = _load_config(args.config) if args.config else None
     link = _link_from_cfg_and_args(args, cfg)
     dev_type = _resolve_type(args, cfg)
+
+
+protocol = _resolve_protocol(args, cfg, args.slave)
+
+if protocol == "tcp":
+    if ModbusTcpClient is None:
+        raise SystemExit("ERROR: ModbusTcpClient not available (pymodbus)")
+    tcp = _tcp_from_cfg(args, cfg or {}, args.slave)
+    cli = ModbusTcpClient(host=tcp.get("host"), port=int(tcp.get("port",502)), timeout=float(tcp.get("timeout",1.0)))
+    if not cli.connect():
+        raise SystemExit("ERROR: TCP connect failed to %s:%s" % (tcp.get("host"), tcp.get("port",502)))
+    try:
+        if dev_type == "sdm230":
+            addr = {"voltage": S_VOLT, "current": S_CURR, "p_active": S_PACT, "pf": S_PF, "freq": S_FREQ, "e_total": S_ETOT, "e_pos": S_EPOS, "e_rev": S_EREV}
+        else:
+            addr = {"voltage": D_VOLT, "current": D_CURR, "p_active": D_PACT, "pf": D_PF, "freq": D_FREQ, "e_total": D_ETOT, "e_pos": D_EPOS, "e_rev": D_EREV}
+        def _rin(a):
+            rr = None
+            try:
+                rr = cli.read_input_registers(address=a, count=2, slave=args.slave)
+            except TypeError:
+                rr = cli.read_input_registers(address=a, count=2, unit=args.slave)
+            if hasattr(rr, "isError") and rr.isError():
+                return float("nan")
+            regs = (rr.registers[0], rr.registers[1])
+            from dds661 import _registers_to_float as _r2f
+            return _r2f(regs)
+        meas = {k: float(_rin(v)) for k, v in addr.items()}
+        out = {
+            "device": {"type": dev_type, "manufacturer": ("Eastron" if dev_type=="sdm230" else "DDS"), "unit": args.slave, "protocol": "tcp", "host": tcp.get("host"), "port": tcp.get("port")},
+            "params": None,
+            "measurements": meas,
+        }
+        print(json.dumps(out, indent=2))
+        return
+    finally:
+        try: cli.close()
+        except Exception: pass
 
     if dev_type == "sdm230":
         dev = SDM230(link, unit=args.slave)

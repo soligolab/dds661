@@ -61,3 +61,22 @@ python3 meter.py --config config.yaml --slave 1 write --baud 9600 --parity-new 0
 ## Troubleshooting
 - **NaN nelle misure** → controlla baud/parità/stop, terminazioni, ID corretto; le misure usano gli **input registers** (0x04).
 - **MQTT** → verifica host/porta/credenziali/TLS; gestione compatibile Paho v1/v2.
+
+
+## Modbus TCP (CNV520-21AD)
+- Aggiunta opzione per interrogare i dispositivi via **TCP** oltre all'RTU.
+- Nel `config.yaml` puoi definire un blocco globale:
+  ```yaml
+  tcp:
+    host: 192.168.0.99
+    port: 502
+    timeout: 1.0
+  ```
+- Per ogni device in `devices:` puoi aggiungere `protocol: tcp` (default: `rtu`).
+
+**meter.py** con TCP (solo lettura misure):
+```bash
+python3 meter.py --config config.yaml --slave 10 --protocol tcp read
+# oppure
+python3 meter.py --type dds661 --protocol tcp --host 192.168.0.99 --port-tcp 502 --slave 10 read
+```

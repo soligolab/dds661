@@ -61,6 +61,16 @@ from typing import Any, Dict, Optional, Tuple, List
 import yaml
 import paho.mqtt.client as mqtt
 
+# TCP client import (pymodbus 3.x then 2.x fallback)
+try:
+    from pymodbus.client import ModbusTcpClient
+except Exception:
+    try:
+        from pymodbus.client.sync import ModbusTcpClient  # type: ignore
+    except Exception:
+        ModbusTcpClient = None  # type: ignore
+
+
 # ---- import driver libs and helpers
 from dds661 import (
     DDS661, LinkConfig,
@@ -279,6 +289,18 @@ def _make_link(cfg: Dict[str, Any]) -> LinkConfig:
         timeout=float(s.get("timeout", 1.0)),
     )
 
+# ------------------------------- TCP config -----------------------------------
+def _tcp_merge(cfg: Dict[str, Any], dev: Dict[str, Any]) -> Dict[str, Any]:
+    g = (cfg.get("tcp") or {}) if isinstance(cfg, dict) else {}
+    d = (dev.get("tcp") or {}) if isinstance(dev, dict) else {}
+    out = dict(g)
+    out.update(d)
+    # defaults
+    out.setdefault("host", "192.168.0.99")
+    out.setdefault("port", 502)
+    out.setdefault("timeout", 1.0)
+    return out
+
 # ------------------------------- Reading ------------------------------------
 
 def _read_device_bulk(dev_type: str, link: LinkConfig, unit_id: int) -> Dict[str, float]:
@@ -288,11 +310,46 @@ def _read_device_bulk(dev_type: str, link: LinkConfig, unit_id: int) -> Dict[str
     dct = asdict(meas)
     return {k: float(dct.get(k, float("nan"))) for k in MEAS_KEYS}
 
-def _read_device_sequential(dev_type: str, link: LinkConfig, unit_id: int, per_measure_delay: float, step_log: bool=False) -> Dict[str, float]:
+def _read_device_sequential(dev_type: str, link: LinkConfig, unit_id: int, per_measure_delay: float, step_log: bool=False, protocol: str='rtu', tcp: Dict[str, Any]|None=None) -> Dict[str, float]:
     out: Dict[str, float] = {}
     cls = DRIVERS[dev_type]
     addrs = ADDR_MAP[dev_type]
-    # Use a fresh client per measurement to match original "sequential" semantics
+
+    # If TCP, reuse a single TCP client for the whole device pass (minimal change)
+    if str(protocol).lower() == "tcp":
+        if ModbusTcpClient is None:
+            raise RuntimeError("pymodbus ModbusTcpClient not available")
+        t = tcp or {}
+        cli = ModbusTcpClient(host=t.get("host","192.168.0.99"), port=int(t.get("port",502)), timeout=float(t.get("timeout",1.0)))
+        try:
+            if not cli.connect():
+                raise RuntimeError("tcp connect failed")
+            for name in MEAS_KEYS:
+                addr = addrs[name]
+                val = float("nan")
+                try:
+                    rr = _call_with_unit(cli.read_input_registers, address=addr, count=2, unit_id=unit_id)
+                    if hasattr(rr, "isError") and rr.isError():
+                        val = float("nan")
+                    else:
+                        regs = (rr.registers[0], rr.registers[1])
+                        val = _registers_to_float(regs)
+                except Exception as e:
+                    log.error("Unit %s (%s/TCP) read '%s' failed: %s", unit_id, dev_type, name, e)
+                    val = float("nan")
+                out[name] = val
+                if step_log:
+                    log.info("read-step device=%s type=%s %s=%s", unit_id, dev_type, name, val)
+                if per_measure_delay > 0:
+                    time.sleep(per_measure_delay)
+        finally:
+            try:
+                cli.close()
+            except Exception:
+                pass
+        return out
+
+    # RTU path (unchanged semantics): fresh client per measurement
     dummy = cls(link, unit=unit_id)  # just to reuse the client's transport config
     for name in MEAS_KEYS:
         addr = addrs[name]
@@ -352,15 +409,21 @@ def _poll_once(client: mqtt.Client, cfg: Dict[str, Any], link: LinkConfig) -> No
         try:
             unit_id = int(d["id"])
             dev_type = str(d.get("type", "dds661")).lower()
+            protocol = str(d.get("protocol","rtu")).lower()
             if dev_type not in DRIVERS:
                 log.error("Unsupported device type '%s' for id=%s", dev_type, unit_id)
                 continue
             name = d.get("name") or f"{dev_type.upper()} {unit_id}"
 
-            if mode == "bulk":
-                vals = _read_device_bulk(dev_type, link, unit_id)
+            # If TCP is selected for this device, force the sequential/TCP path (minimal change)
+            if protocol == "tcp":
+                tcp = _tcp_merge(cfg, d)
+                vals = _read_device_sequential(dev_type, link, unit_id, per_measure_delay, step_log=debug_log, protocol="tcp", tcp=tcp)
             else:
-                vals = _read_device_sequential(dev_type, link, unit_id, per_measure_delay, step_log=debug_log)
+                if mode == "bulk":
+                    vals = _read_device_bulk(dev_type, link, unit_id)
+                else:
+                    vals = _read_device_sequential(dev_type, link, unit_id, per_measure_delay, step_log=debug_log)
 
             payload = {
                 "id": unit_id,
