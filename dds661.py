@@ -72,20 +72,30 @@ def _registers_to_float(regs: Tuple[int, int]) -> float:
 # ---------------------- pymodbus compat (slave/unit) -----------------------
 
 def _call_with_unit(func: Callable[..., Any], *, address: int, count: int, unit_id: int):
-    try:
-        return func(address=address, count=count, slave=unit_id)
-    except TypeError as exc:
-        if "unexpected keyword argument 'slave'" not in str(exc):
-            raise
-        return func(address=address, count=count, unit=unit_id)
+    last_exc: Optional[TypeError] = None
+    for kw in ("slave", "unit", "unit_id", "device_id"):
+        try:
+            return func(address=address, count=count, **{kw: unit_id})
+        except TypeError as exc:
+            if f"unexpected keyword argument '{kw}'" not in str(exc):
+                raise
+            last_exc = exc
+    if last_exc is not None:
+        raise last_exc
+    return func(address=address, count=count)
 
 def _write_with_unit(func: Callable[..., Any], *, address: int, values: list[int], unit_id: int):
-    try:
-        return func(address=address, values=values, slave=unit_id)
-    except TypeError as exc:
-        if "unexpected keyword argument 'slave'" not in str(exc):
-            raise
-        return func(address=address, values=values, unit=unit_id)
+    last_exc: Optional[TypeError] = None
+    for kw in ("slave", "unit", "unit_id", "device_id"):
+        try:
+            return func(address=address, values=values, **{kw: unit_id})
+        except TypeError as exc:
+            if f"unexpected keyword argument '{kw}'" not in str(exc):
+                raise
+            last_exc = exc
+    if last_exc is not None:
+        raise last_exc
+    return func(address=address, values=values)
 
 # --------------------------------- Client ----------------------------------
 
