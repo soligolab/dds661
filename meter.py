@@ -158,7 +158,9 @@ if protocol == "tcp":
             rr = None
             try:
                 rr = cli.read_input_registers(address=a, count=2, slave=args.slave)
-            except TypeError:
+            except TypeError as exc:
+                if "unexpected keyword argument 'slave'" not in str(exc):
+                    raise
                 rr = cli.read_input_registers(address=a, count=2, unit=args.slave)
             if hasattr(rr, "isError") and rr.isError():
                 return float("nan")

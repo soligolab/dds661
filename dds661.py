@@ -74,13 +74,17 @@ def _registers_to_float(regs: Tuple[int, int]) -> float:
 def _call_with_unit(func: Callable[..., Any], *, address: int, count: int, unit_id: int):
     try:
         return func(address=address, count=count, slave=unit_id)
-    except TypeError:
+    except TypeError as exc:
+        if "unexpected keyword argument 'slave'" not in str(exc):
+            raise
         return func(address=address, count=count, unit=unit_id)
 
 def _write_with_unit(func: Callable[..., Any], *, address: int, values: list[int], unit_id: int):
     try:
         return func(address=address, values=values, slave=unit_id)
-    except TypeError:
+    except TypeError as exc:
+        if "unexpected keyword argument 'slave'" not in str(exc):
+            raise
         return func(address=address, values=values, unit=unit_id)
 
 # --------------------------------- Client ----------------------------------
