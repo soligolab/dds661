@@ -14,6 +14,37 @@ Tooling per leggere/scrivere **DDS661** e **Eastron SDM230** via Modbus RTU con 
 pip install "pymodbus>=3,<4" pyserial paho-mqtt pyyaml
 ```
 
+## Installazione e avvio del servizio (LXC con utente root)
+Esempio per container Proxmox dove il repository è in `/root/dds661`.
+
+1. **Clona il repository**
+   ```bash
+   cd /root
+   git clone <URL_REPO> dds661
+   cd dds661
+   ```
+2. **Crea il virtualenv e installa le dipendenze**
+   ```bash
+   python3 -m venv .venv
+   . .venv/bin/activate
+   pip install -r requirements.txt
+   ```
+3. **Configura il servizio systemd**
+   ```bash
+   cp service/dds661-polling.service /etc/systemd/system/dds661-polling.service
+   systemctl daemon-reload
+   ```
+4. **Abilita e avvia il servizio**
+   ```bash
+   systemctl enable --now dds661-polling.service
+   ```
+5. **Verifica lo stato**
+   ```bash
+   systemctl status dds661-polling.service
+   ```
+
+> Assicurati di aggiornare `config.yaml` in base alle tue porte Modbus e alle credenziali MQTT.
+
 ## Configurazione (adattata al tuo setup)
 Vedi `config.yaml` incluso. Differenze rispetto al file storico:
 - `polling.period_s` sostituisce `polling.interval_s` (qui impostato a **1.0** secondi).
