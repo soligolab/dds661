@@ -36,21 +36,12 @@ polling:
   debug_log: false              # stampa JSON per-device sul log
 
 devices:
-  - id: 1
-    type: sdm230
-    name: "Contatore F.M"
   - id: 10
     type: dds661
-    name: "Contatore Cucina"
+    name: "Contatore Rack Garage"
   - id: 11
     type: dds661
-    name: "Contatore PompaCalore"
-  - id: 12
-    type: dds661
-    name: "Contatore Giardino"
-  - id: 13
-    type: dds661
-    name: "Contatore Rack"
+    name: "Contatore Rack PianoSuperiore"
 
 # Global Modbus TCP defaults (transparent bridge CNV520-21AD)
 tcp:
