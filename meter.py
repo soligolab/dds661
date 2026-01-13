@@ -24,7 +24,7 @@ try:
 except Exception:
     _HAS_YAML = False
 
-from dds661 import DDS661, LinkConfig, IN_VOLTAGE as D_VOLT, IN_CURRENT as D_CURR, IN_P_ACT as D_PACT, IN_PF as D_PF, IN_FREQ as D_FREQ, IN_E_TOT as D_ETOT, IN_E_POS as D_EPOS, IN_E_REV as D_EREV
+from dds661 import DDS661, LinkConfig, _call_with_unit, IN_VOLTAGE as D_VOLT, IN_CURRENT as D_CURR, IN_P_ACT as D_PACT, IN_PF as D_PF, IN_FREQ as D_FREQ, IN_E_TOT as D_ETOT, IN_E_POS as D_EPOS, IN_E_REV as D_EREV
 from sdm230 import SDM230, IN_VOLTAGE as S_VOLT, IN_CURRENT as S_CURR, IN_P_ACT as S_PACT, IN_PF as S_PF, IN_FREQ as S_FREQ, IN_E_TOT as S_ETOT, IN_E_POS as S_EPOS, IN_E_REV as S_EREV
 
 try:
@@ -155,13 +155,7 @@ if protocol == "tcp":
         else:
             addr = {"voltage": D_VOLT, "current": D_CURR, "p_active": D_PACT, "pf": D_PF, "freq": D_FREQ, "e_total": D_ETOT, "e_pos": D_EPOS, "e_rev": D_EREV}
         def _rin(a):
-            rr = None
-            try:
-                rr = cli.read_input_registers(address=a, count=2, slave=args.slave)
-            except TypeError as exc:
-                if "unexpected keyword argument 'slave'" not in str(exc):
-                    raise
-                rr = cli.read_input_registers(address=a, count=2, unit=args.slave)
+            rr = _call_with_unit(cli.read_input_registers, address=a, count=2, unit_id=args.slave)
             if hasattr(rr, "isError") and rr.isError():
                 return float("nan")
             regs = (rr.registers[0], rr.registers[1])
