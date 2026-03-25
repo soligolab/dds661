@@ -92,6 +92,13 @@ python3 meter.py --config config.yaml --slave 1 write --baud 9600 --parity-new 0
 ## Troubleshooting
 - **NaN nelle misure** → controlla baud/parità/stop, terminazioni, ID corretto; le misure usano gli **input registers** (0x04).
 - **MQTT** → verifica host/porta/credenziali/TLS; gestione compatibile Paho v1/v2.
+- **`OSError: [Errno 101] Network is unreachable`** → la rete del container/host non ha route verso il broker.
+  - Verifica gateway/interfaccia con `ip route` e connettività verso il broker (`ping <host>`, `nc -vz <host> 1883`).
+  - In `mqtt` usa:
+    - `connect_retries` (0 = retry infinito),
+    - `connect_retry_delay_s` (ritardo tra tentativi),
+    - `socket_timeout_s` (timeout socket).
+  - Avvia con log dettagliato: `python3 polling.py --config config.yaml --log DEBUG`.
 
 
 ## Modbus TCP (CNV520-21AD)
