@@ -17,6 +17,9 @@ mqtt:
   username: mqttuser
   password: mqttpass
   keepalive: 30
+  socket_timeout_s: 10.0        # timeout socket MQTT (utile per debug/reti instabili)
+  connect_retries: 0            # 0 = retry infinito
+  connect_retry_delay_s: 5.0    # attesa tra i tentativi
   base_topic: dds661
   topic_style: measurements    # flat | state | measurements (informativo)
   qos: 0

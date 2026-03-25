@@ -49,8 +49,10 @@ devices:
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import logging
+import socket
 import signal
 import sys
 import threading
@@ -191,8 +193,50 @@ def _mqtt_connect(client: mqtt.Client, cfg: Dict[str, Any]) -> None:
     host = m.get("host", "127.0.0.1")
     port = int(m.get("port", 1883))
     keepalive = int(m.get("keepalive", 60))
-    client.connect(host, port, keepalive)
-    client.loop_start()
+    retries = int(m.get("connect_retries", 0))
+    retry_delay_s = max(0.0, float(m.get("connect_retry_delay_s", 5.0)))
+    socket_timeout_s = float(m.get("socket_timeout_s", 10.0))
+
+    client.socket_timeout = socket_timeout_s
+
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+            endpoints = ", ".join(sorted({f"{it[4][0]}:{it[4][1]}" for it in infos}))
+            log.debug("MQTT endpoint resolution for %s:%s -> %s", host, port, endpoints)
+        except Exception as e:
+            log.warning("MQTT DNS resolution failed for %s:%s: %s", host, port, e)
+
+        try:
+            client.connect(host, port, keepalive)
+            client.loop_start()
+            if attempt > 1:
+                log.info("MQTT connection restored on attempt %d", attempt)
+            return
+        except OSError as e:
+            if e.errno == errno.ENETUNREACH:
+                log.error(
+                    "MQTT connect failed: network unreachable (host=%s port=%d attempt=%d/%s).",
+                    host, port, attempt, "∞" if retries <= 0 else retries,
+                )
+            else:
+                log.error(
+                    "MQTT connect OS error (host=%s port=%d attempt=%d/%s errno=%s): %s",
+                    host, port, attempt, "∞" if retries <= 0 else retries, e.errno, e,
+                )
+        except Exception as e:
+            log.error(
+                "MQTT connect failed (host=%s port=%d attempt=%d/%s): %s",
+                host, port, attempt, "∞" if retries <= 0 else retries, e,
+            )
+
+        if retries > 0 and attempt >= retries:
+            raise RuntimeError(f"Unable to connect to MQTT broker {host}:{port} after {attempt} attempts")
+
+        log.warning("Retrying MQTT connect in %.1fs...", retry_delay_s)
+        time.sleep(retry_delay_s)
 
 # ------------------------------- Topic Helpers -------------------------------
 
