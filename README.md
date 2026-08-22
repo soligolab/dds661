@@ -21,6 +21,37 @@ Tre trasporti: seriale RTU, Modbus TCP e RTU-over-TCP (gateway trasparenti tipo 
 pip install "pymodbus>=3,<4" pyserial paho-mqtt pyyaml
 ```
 
+## Installazione e avvio del servizio (LXC con utente root)
+Esempio per container Proxmox dove il repository è in `/root/dds661`.
+
+1. **Clona il repository**
+   ```bash
+   cd /root
+   git clone <URL_REPO> dds661
+   cd dds661
+   ```
+2. **Crea il virtualenv e installa le dipendenze**
+   ```bash
+   python3 -m venv .venv
+   . .venv/bin/activate
+   pip install -r requirements.txt
+   ```
+3. **Configura il servizio systemd**
+   ```bash
+   cp service/dds661-polling.service /etc/systemd/system/dds661-polling.service
+   systemctl daemon-reload
+   ```
+4. **Abilita e avvia il servizio**
+   ```bash
+   systemctl enable --now dds661-polling.service
+   ```
+5. **Verifica lo stato**
+   ```bash
+   systemctl status dds661-polling.service
+   ```
+
+> Assicurati di aggiornare `config.yaml` in base alle tue porte Modbus e alle credenziali MQTT.
+
 ## Configurazione (adattata al tuo setup)
 Vedi `config.yaml` incluso. Differenze rispetto al file storico:
 - `polling.period_s` sostituisce `polling.interval_s` (qui impostato a **1.0** secondi).
@@ -174,6 +205,13 @@ cablaggio A/B), non la mappa.
 ## Troubleshooting
 - **NaN nelle misure** → controlla baud/parità/stop, terminazioni, ID corretto; le misure usano gli **input registers** (0x04).
 - **MQTT** → verifica host/porta/credenziali/TLS; gestione compatibile Paho v1/v2.
+- **`OSError: [Errno 101] Network is unreachable`** → la rete del container/host non ha route verso il broker.
+  - Verifica gateway/interfaccia con `ip route` e connettività verso il broker (`ping <host>`, `nc -vz <host> 1883`).
+  - In `mqtt` usa:
+    - `connect_retries` (0 = retry infinito),
+    - `connect_retry_delay_s` (ritardo tra tentativi),
+    - `socket_timeout_s` (timeout socket).
+  - Avvia con log dettagliato: `python3 polling.py --config config.yaml --log DEBUG`.
 
 
 ## Trasporti Modbus

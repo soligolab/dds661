@@ -17,6 +17,9 @@ mqtt:
   username: mqttuser
   password: mqttpass
   keepalive: 30
+  socket_timeout_s: 10.0        # timeout socket MQTT (utile per debug/reti instabili)
+  connect_retries: 0            # 0 = retry infinito, altrimenti numero di tentativi
+  connect_retry_delay_s: 5.0    # attesa tra i tentativi
   base_topic: modbus
   topic_style: measurements    # flat | state | measurements (informativo)
   qos: 0
@@ -37,21 +40,12 @@ polling:
   reconnect_each_read: false    # true = riapre la connessione a ogni misura (bus instabili)
 
 devices:
-  - id: 1
-    type: sdm230
-    name: "Contatore F.M"
   - id: 10
     type: dds661
-    name: "Contatore Cucina"
+    name: "Contatore Rack Garage"
   - id: 11
     type: dds661
-    name: "Contatore PompaCalore"
-  - id: 12
-    type: dds661
-    name: "Contatore Giardino"
-  - id: 13
-    type: dds661
-    name: "Contatore Rack"
+    name: "Contatore Rack PianoSuperiore"
 
   # ---- dietro il DR302, bus a 57600 8N1 ----
 
