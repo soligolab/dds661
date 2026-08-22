@@ -34,6 +34,7 @@ polling:
   per_measure_delay_ms: 80      # ritardo tra letture di singole misure
   delay_ms_between_devices: 80  # ritardo tra dispositivi
   debug_log: false              # stampa JSON per-device sul log
+  reconnect_each_read: false    # true = riapre la connessione a ogni misura (bus instabili)
 
 devices:
   - id: 1
@@ -52,8 +53,73 @@ devices:
     type: dds661
     name: "Contatore Rack"
 
-# Global Modbus TCP defaults (transparent bridge CNV520-21AD)
+  # ---- dietro il DR302, bus a 57600 8N1 ----
+
+  # Lettore temperature DS18B20, 12 canali. Attenzione: id 10 e' anche il "Contatore
+  # Cucina" qui sopra: i due convivono perche' stanno su bus diversi, ma servono 'uid:'
+  # (identita' Home Assistant) e, da riga di comando, --device invece di --slave.
+  - id: 10
+    type: ds18b20
+    name: "Temperature Casa"
+    uid: temp_casa
+    link: dr302
+    read_mode: bulk             # 13 registri contigui in una sola transazione
+    channels:                   # solo i canali elencati vengono pubblicati;
+      1: "Soggiorno"            # un canale senza sonda pubblica NaN, non 0,00 gradi
+      2: "Cucina"
+      3: "Lavanderia"
+      4: "Esterno Nord"
+
+  # Modulo I/O Pixsys: 16 ingressi digitali in un solo registro, uno per bit.
+  # Logica invertita (bit a 1 = contatto chiuso): e' il default, si cambia con 'invert'.
+  - id: 5
+    type: mcm260
+    name: "MCM260 Soggiorno"
+    uid: mcm260_soggiorno
+    link: dr302
+    read_mode: bulk
+    inputs:                     # bit: {name, device_class}
+      0:  {name: "Finestra Cucina DX",         device_class: window}
+      1:  {name: "Finestra Cucina SX",         device_class: window}
+      2:  {name: "Portoncino Disimpegno",      device_class: door}
+      3:  {name: "Finestra Bagno Terra",       device_class: window}
+      4:  {name: "Perimetrale Nord Est",       device_class: occupancy}
+      8:  {name: "Portafinestra Soggiorno SX", device_class: window}
+      9:  {name: "Portafinestra Soggiorno DX", device_class: window}
+      10: {name: "Portafinestra Lavanderia",   device_class: window}
+      11: {name: "Perimetrale Nord Ovest",     device_class: occupancy}
+
+# Default Modbus TCP globali (bridge CNV520-21AD)
 tcp:
   host: 192.168.0.99
   port: 502
   timeout: 1.0
+
+# Trasporti con nome: un device li referenzia con 'link: <nome>'.
+# Utile quando piu' contatori stanno sullo stesso bus/gateway: host e porta si scrivono una volta.
+links:
+  # USR-DR302 (Ethernet <-> RS485) in modalita' TRASPARENTE: le trame Modbus RTU con
+  # CRC16 viaggiano dentro il socket TCP.
+  # Sul bus: lettore temperature DS18B20 (slave 10) e modulo I/O MCM260 (slave 5).
+  # Lato gateway: TCP Server, porta 502, linea 57600 8N1, "Modbus TCP" e
+  # "Similar RFC2217" DISATTIVATE.
+  # La linea e' 57600 8N1 perche' e' quella del lettore temperature: i contatori a 8E1
+  # non possono condividere questo bus, ed e' il motivo per cui restano sulla seriale locale.
+  dr302:
+    protocol: rtutcp
+    host: 192.168.1.177
+    port: 502
+    timeout: 1.5                # piu' generoso: latenza rete + turnaround RS485
+    retries: 1                  # una misura persa la si riprende al ciclo dopo:
+                                # col default di pymodbus (3) un device muto costa
+                                # 8 misure x 4 tentativi x timeout = oltre 30 s di stallo
+
+  # Stesso hardware con la CONVERSIONE di protocollo attiva sul gateway ("Modbus TCP"):
+  # parlerebbe Modbus TCP vero, header MBAP. Non in uso, tenuto per riferimento.
+  dr302_gw:
+    protocol: tcp
+    host: 192.168.1.177
+    port: 502
+    timeout: 1.5
+    retries: 1
+

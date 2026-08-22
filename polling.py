@@ -7,13 +7,25 @@ Publishes to MQTT (Home Assistant discovery optional).
 
 Config (example):
 -----------------
-serial:
+serial:                    # default per i device su seriale locale (protocol: rtu)
   port: /dev/ttyCOM1
   baudrate: 9600
   parity: E
   stopbits: 1
   bytesize: 8
   timeout: 1.0
+
+tcp:                       # default per i device Modbus TCP (protocol: tcp)
+  host: 192.168.0.99
+  port: 502
+  timeout: 1.0
+
+links:                     # trasporti con nome, referenziati da 'link:' nel device
+  dr302:                   # USR-DR302 in modalita' trasparente (RTU dentro TCP)
+    protocol: rtutcp
+    host: 192.168.1.177
+    port: 502
+    timeout: 1.5
 
 mqtt:
   host: 127.0.0.1
@@ -36,14 +48,19 @@ polling:
   delay_ms_between_devices: 0
   period_s: 5
   debug_log: false
+  reconnect_each_read: false # true = riapre la connessione a ogni misura (bus instabili)
 
 devices:
   - id: 1
     type: dds661
-    name: "Main DDS"
+    name: "Main DDS"         # nessun protocol/link -> rtu sul blocco serial: globale
   - id: 5
     type: sdm230
     name: "PV Import/Export"
+  - id: 20
+    type: sdm230
+    name: "Behind gateway"
+    link: dr302              # -> trasporto definito in links:
 """
 
 from __future__ import annotations
@@ -61,49 +78,45 @@ from typing import Any, Dict, Optional, Tuple, List
 import yaml
 import paho.mqtt.client as mqtt
 
-# TCP client import (pymodbus 3.x then 2.x fallback)
-try:
-    from pymodbus.client import ModbusTcpClient
-except Exception:
-    try:
-        from pymodbus.client.sync import ModbusTcpClient  # type: ignore
-    except Exception:
-        ModbusTcpClient = None  # type: ignore
-
-
-# ---- import driver libs and helpers
-from dds661 import (
-    DDS661, LinkConfig,
-    _call_with_unit, _registers_to_float,
-    IN_VOLTAGE as D_VOLT, IN_CURRENT as D_CURR, IN_P_ACT as D_PACT,
-    IN_PF as D_PF, IN_FREQ as D_FREQ, IN_E_TOT as D_ETOT, IN_E_POS as D_EPOS, IN_E_REV as D_EREV,
-)
-from sdm230 import (
-    SDM230,
-    IN_VOLTAGE as S_VOLT, IN_CURRENT as S_CURR, IN_P_ACT as S_PACT,
-    IN_PF as S_PF, IN_FREQ as S_FREQ, IN_E_TOT as S_ETOT, IN_E_POS as S_EPOS, IN_E_REV as S_EREV,
-)
+# ---- trasporto unificato (rtu / tcp / rtutcp) e driver
+from transport import ModbusSession, TransportConfig, resolve_transport
+from drivers import DRIVERS
 
 log = logging.getLogger("meters.poller")
 
-MEAS_KEYS = ("voltage", "current", "p_active", "pf", "freq", "e_total", "e_pos", "e_rev")
+# Le grandezze non sono piu' un elenco fisso: ogni driver dichiara le proprie
+# tramite measures(dev_cfg), e lettura e discovery HA seguono quelle.
 
-# For sequential reads we need address maps per driver
-ADDR_MAP = {
-    "dds661": {
-        "voltage": D_VOLT, "current": D_CURR, "p_active": D_PACT, "pf": D_PF, "freq": D_FREQ,
-        "e_total": D_ETOT, "e_pos": D_EPOS, "e_rev": D_EREV,
-    },
-    "sdm230": {
-        "voltage": S_VOLT, "current": S_CURR, "p_active": S_PACT, "pf": S_PF, "freq": S_FREQ,
-        "e_total": S_ETOT, "e_pos": S_EPOS, "e_rev": S_EREV,
-    },
-}
+def _driver(dev_type: str, tc: TransportConfig, unit_id: int, dev: Optional[Dict[str, Any]] = None):
+    return DRIVERS[dev_type](tc, unit=unit_id, dev_cfg=dev)
 
-DRIVERS = {
-    "dds661": DDS661,
-    "sdm230": SDM230,
-}
+def _device_uid(dev: Dict[str, Any], dev_type: str, unit_id: int) -> str:
+    """Identita' del dispositivo per Home Assistant.
+
+    Il default storico e' '{tipo}_{id}', ma con piu' gateway l'unit id non basta:
+    due moduli identici in stanze diverse possono avere lo stesso indirizzo. La
+    chiave 'uid:' permette di disambiguarli senza toccare le entita' esistenti.
+    """
+    return str(dev.get("uid") or f"{dev_type}_{unit_id}")
+
+def _validate_devices(cfg: Dict[str, Any]) -> None:
+    """Segnala tipi sconosciuti e uid duplicati all'avvio, invece di lasciare che
+    le entita' HA si sovrascrivano in silenzio."""
+    seen: Dict[str, str] = {}
+    for d in (cfg.get("devices") or []):
+        dev_type = str(d.get("type", "dds661")).lower()
+        name = d.get("name") or f"{dev_type.upper()} {d.get('id')}"
+        if dev_type not in DRIVERS:
+            log.error("Tipo '%s' sconosciuto per il device '%s' (attesi: %s)",
+                      dev_type, name, ", ".join(sorted(DRIVERS)))
+            continue
+        uid = _device_uid(d, dev_type, int(d.get("id", 0)))
+        if uid in seen:
+            log.error("uid duplicato '%s': '%s' e '%s' si sovrascriverebbero in Home "
+                      "Assistant. Assegnare un 'uid:' esplicito a uno dei due.",
+                      uid, seen[uid], name)
+        else:
+            seen[uid] = name
 
 def _slugify_name(name: str) -> str:
     import re, unicodedata
@@ -232,151 +245,90 @@ def _ha_publish_discovery(client: mqtt.Client, cfg: Dict[str, Any]) -> None:
     dprefix = ha.get("discovery_prefix", "homeassistant")
     area = ha.get("area")
 
-    sensors = [
-        ("voltage", "Voltage", "V", "voltage"),
-        ("current", "Current", "A", "current"),
-        ("p_active", "Active Power", "W", "power"),
-        ("pf", "Power Factor", "", None),
-        ("freq", "Frequency", "Hz", "frequency"),
-        ("e_total", "Energy Total", "kWh", "energy"),
-        ("e_pos", "Energy Import", "kWh", "energy"),
-        ("e_rev", "Energy Export", "kWh", "energy"),
-    ]
-
     for d in cfg.get("devices", []):
         unit_id = int(d["id"])
         dev_type = str(d.get("type", "dds661")).lower()
+        if dev_type not in DRIVERS:
+            continue
+        cls = DRIVERS[dev_type]
         name = d.get("name") or f"{dev_type.upper()} {unit_id}"
-        unique_base = f"{dev_type}_{unit_id}"
-        model = dev_type.upper()
-        manufacturer = "DDS" if dev_type == "dds661" else "Eastron"
-        device = _ha_device(unique_base, name, area, model, manufacturer)
+        unique_base = _device_uid(d, dev_type, unit_id)
+        device = _ha_device(unique_base, name, area, cls.MODEL, cls.MANUFACTURER)
 
         state_topic = f"{base_topic}/{_topic_key(name, unit_id)}/state"
         availability = {"topic": f"{base_topic}/status"}
 
-        for key, label, unit, dev_class in sensors:
-            comp = "sensor"
-            unique_id = f"{unique_base}_{key}"
+        for m in cls.measures(d):
+            comp = m.component
+            unique_id = f"{unique_base}_{m.key}"
             obj_id = f"{unique_id}"
+            binary = comp == "binary_sensor"
             cfg_payload = {
-                "name": f"{name} {label}",
+                "name": f"{name} {m.label}",
                 "uniq_id": unique_id,
                 "stat_t": state_topic,
                 "avty": [availability],
-                "val_tpl": f"{{{{ value_json.{key} | float }}}}",
+                # I binary_sensor pubblicano 0/1 interi e si confrontano con pl_on/pl_off;
+                # i sensori numerici passano da '| float'.
+                "val_tpl": (f"{{{{ value_json.{m.key} }}}}" if binary
+                            else f"{{{{ value_json.{m.key} | float }}}}"),
                 "dev": device,
             }
-            if unit:
-                cfg_payload["unit_of_meas"] = unit
-            if dev_class:
-                cfg_payload["dev_cla"] = dev_class
+            if binary:
+                cfg_payload["pl_on"] = "1"
+                cfg_payload["pl_off"] = "0"
+            if m.unit:
+                cfg_payload["unit_of_meas"] = m.unit
+            if m.device_class:
+                cfg_payload["dev_cla"] = m.device_class
+            if m.state_class:
+                cfg_payload["stat_cla"] = m.state_class
 
             topic = f"{dprefix}/{comp}/{obj_id}/config"
             client.publish(topic, json.dumps(cfg_payload, ensure_ascii=False), qos=qos, retain=retain)
 
-# ------------------------------- Serial Link --------------------------------
-
-def _make_link(cfg: Dict[str, Any]) -> LinkConfig:
-    s = cfg.get("serial", {}) if isinstance(cfg, dict) else {}
-    parity = str(s.get("parity", "E")).upper()[0]
-    return LinkConfig(
-        port=s.get("port", "/dev/ttyCOM1"),
-        baudrate=int(s.get("baudrate", 9600)),
-        parity=parity,
-        stopbits=int(s.get("stopbits", 1)),
-        bytesize=int(s.get("bytesize", 8)),
-        timeout=float(s.get("timeout", 1.0)),
-    )
-
-# ------------------------------- TCP config -----------------------------------
-def _tcp_merge(cfg: Dict[str, Any], dev: Dict[str, Any]) -> Dict[str, Any]:
-    g = (cfg.get("tcp") or {}) if isinstance(cfg, dict) else {}
-    d = (dev.get("tcp") or {}) if isinstance(dev, dict) else {}
-    out = dict(g)
-    out.update(d)
-    # defaults
-    out.setdefault("host", "192.168.0.99")
-    out.setdefault("port", 502)
-    out.setdefault("timeout", 1.0)
-    return out
-
 # ------------------------------- Reading ------------------------------------
+# Il trasporto (rtu / tcp / rtutcp) e' risolto per dispositivo da
+# transport.resolve_transport(): vedi il docstring del modulo per i blocchi di config.
 
-def _read_device_bulk(dev_type: str, link: LinkConfig, unit_id: int) -> Dict[str, float]:
-    cls = DRIVERS[dev_type]
-    dev = cls(link, unit=unit_id)
-    meas = dev.read_measurements()
-    dct = asdict(meas)
-    return {k: float(dct.get(k, float("nan"))) for k in MEAS_KEYS}
+def _read_device_bulk(dev_type: str, tc: TransportConfig, unit_id: int,
+                      dev: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
+    """Delega al driver, che puo' leggere a blocco i registri contigui."""
+    return _driver(dev_type, tc, unit_id, dev).read_values(dev)
 
-def _read_device_sequential(dev_type: str, link: LinkConfig, unit_id: int, per_measure_delay: float, step_log: bool=False, protocol: str='rtu', tcp: Dict[str, Any]|None=None) -> Dict[str, float]:
-    out: Dict[str, float] = {}
-    cls = DRIVERS[dev_type]
-    addrs = ADDR_MAP[dev_type]
+def _read_device_sequential(dev_type: str, tc: TransportConfig, unit_id: int,
+                            per_measure_delay: float, dev: Optional[Dict[str, Any]] = None,
+                            step_log: bool = False,
+                            reconnect_each_read: bool = False) -> Dict[str, float]:
+    """Legge le grandezze una per una riusando una sola connessione per passata.
 
-    # If TCP, reuse a single TCP client for the whole device pass (minimal change)
-    if str(protocol).lower() == "tcp":
-        if ModbusTcpClient is None:
-            raise RuntimeError("pymodbus ModbusTcpClient not available")
-        t = tcp or {}
-        cli = ModbusTcpClient(host=t.get("host","192.168.0.99"), port=int(t.get("port",502)), timeout=float(t.get("timeout",1.0)))
-        try:
-            if not cli.connect():
-                raise RuntimeError("tcp connect failed")
-            for name in MEAS_KEYS:
-                addr = addrs[name]
-                val = float("nan")
-                try:
-                    rr = _call_with_unit(cli.read_input_registers, address=addr, count=2, unit_id=unit_id)
-                    if hasattr(rr, "isError") and rr.isError():
-                        val = float("nan")
-                    else:
-                        regs = (rr.registers[0], rr.registers[1])
-                        val = _registers_to_float(regs)
-                except Exception as e:
-                    log.error("Unit %s (%s/TCP) read '%s' failed: %s", unit_id, dev_type, name, e)
-                    val = float("nan")
-                out[name] = val
-                if step_log:
-                    log.info("read-step device=%s type=%s %s=%s", unit_id, dev_type, name, val)
-                if per_measure_delay > 0:
-                    time.sleep(per_measure_delay)
-        finally:
-            try:
-                cli.close()
-            except Exception:
-                pass
-        return out
+    Vale per tutti i trasporti: su rtutcp la ModbusSession riapre il socket dopo un
+    errore, perche' un gateway trasparente non ha transaction id e uno stream
+    desincronizzato farebbe fallire tutte le letture successive.
+    """
+    out: Dict[str, Any] = {}
+    where = tc.describe()
+    drv = _driver(dev_type, tc, unit_id, dev)
 
-    # RTU path (unchanged semantics): fresh client per measurement
-    dummy = cls(link, unit=unit_id)  # just to reuse the client's transport config
-    for name in MEAS_KEYS:
-        addr = addrs[name]
-        cli = dummy._make_client()  # type: ignore[attr-defined]
-        val = float("nan")
-        try:
-            if not cli.connect():
-                raise RuntimeError("serial open failed")
-            rr = _call_with_unit(cli.read_input_registers, address=addr, count=2, unit_id=unit_id)
-            if hasattr(rr, "isError") and rr.isError():
-                val = float("nan")
-            else:
-                regs = (rr.registers[0], rr.registers[1])
-                val = _registers_to_float(regs)
-        except Exception as e:
-            log.error("Unit %s (%s) read '%s' failed: %s", unit_id, dev_type, name, e)
+    with ModbusSession(tc, reconnect_each_read=reconnect_each_read,
+                       label=f"{dev_type} unit={unit_id} via {where}") as ses:
+        for m in drv.measures(dev):
             val = float("nan")
-        finally:
             try:
-                cli.close()
-            except Exception:
-                pass
-        out[name] = val
-        if step_log:
-            log.info("read-step device=%s type=%s %s=%s", unit_id, dev_type, name, val)
-        if per_measure_delay > 0:
-            time.sleep(per_measure_delay)
+                val = ses.read_measure(m, unit_id)
+            except Exception as e:
+                log.error("Unit %s (%s via %s) read '%s' failed: %s",
+                          unit_id, dev_type, where, m.key, e)
+            out[m.key] = val
+            if step_log:
+                log.info("read-step device=%s type=%s %s=%s", unit_id, dev_type, m.key, val)
+            if per_measure_delay > 0:
+                time.sleep(per_measure_delay)
+
+        # Alcuni valori non si giudicano dal singolo registro: il lettore DS18B20
+        # distingue "0,00 gradi" da "sonda assente" solo con la maschera di presenza.
+        if hasattr(drv, "postprocess"):
+            out = drv.postprocess(out, ses, unit_id)
     return out
 
 # ------------------------------- Polling ------------------------------------
@@ -386,17 +338,18 @@ _stop_evt = threading.Event()
 def _handle_sigterm(signum, frame):
     _stop_evt.set()
 
-def _poll_once(client: mqtt.Client, cfg: Dict[str, Any], link: LinkConfig) -> None:
+def _poll_once(client: mqtt.Client, cfg: Dict[str, Any]) -> None:
     m = cfg.get("mqtt", {}) if isinstance(cfg, dict) else {}
     base_topic = m.get("base_topic", "energy")
     qos = int(m.get("qos", 0))
     retain = bool(m.get("retain", True))
 
     p = cfg.get("polling", {}) if isinstance(cfg, dict) else {}
-    mode = str(p.get("read_mode", "sequential")).lower()
+    default_mode = str(p.get("read_mode", "sequential")).lower()
     per_measure_delay_ms = int(p.get("per_measure_delay_ms", 50))
     per_measure_delay = max(0.0, per_measure_delay_ms / 1000.0)
     debug_log = bool(p.get("debug_log", False))
+    reconnect_each_read = bool(p.get("reconnect_each_read", False))
     delay_between_devices_ms = int(p.get("delay_ms_between_devices", 0))
     delay_between_devices_s = max(0.0, delay_between_devices_ms / 1000.0)
 
@@ -409,21 +362,24 @@ def _poll_once(client: mqtt.Client, cfg: Dict[str, Any], link: LinkConfig) -> No
         try:
             unit_id = int(d["id"])
             dev_type = str(d.get("type", "dds661")).lower()
-            protocol = str(d.get("protocol","rtu")).lower()
             if dev_type not in DRIVERS:
                 log.error("Unsupported device type '%s' for id=%s", dev_type, unit_id)
                 continue
             name = d.get("name") or f"{dev_type.upper()} {unit_id}"
+            tc = resolve_transport(cfg, d)
+            # 'read_mode' per-device: un lettore con registri contigui vuole 'bulk'
+            # (una transazione) mentre i contatori restano 'sequential', nello stesso config.
+            mode = str(d.get("read_mode", default_mode)).lower()
+            if debug_log:
+                log.info("polling device=%s type=%s transport=%s mode=%s",
+                         unit_id, dev_type, tc.describe(), mode)
 
-            # If TCP is selected for this device, force the sequential/TCP path (minimal change)
-            if protocol == "tcp":
-                tcp = _tcp_merge(cfg, d)
-                vals = _read_device_sequential(dev_type, link, unit_id, per_measure_delay, step_log=debug_log, protocol="tcp", tcp=tcp)
+            if mode == "bulk":
+                vals = _read_device_bulk(dev_type, tc, unit_id, d)
             else:
-                if mode == "bulk":
-                    vals = _read_device_bulk(dev_type, link, unit_id)
-                else:
-                    vals = _read_device_sequential(dev_type, link, unit_id, per_measure_delay, step_log=debug_log)
+                vals = _read_device_sequential(dev_type, tc, unit_id, per_measure_delay, d,
+                                               step_log=debug_log,
+                                               reconnect_each_read=reconnect_each_read)
 
             payload = {
                 "id": unit_id,
@@ -445,7 +401,7 @@ def _poll_once(client: mqtt.Client, cfg: Dict[str, Any], link: LinkConfig) -> No
                 time.sleep(delay_between_devices_s)
 
 def run_poll(cfg: Dict[str, Any], oneshot: bool = False) -> None:
-    link = _make_link(cfg)
+    _validate_devices(cfg)
     client = _mqtt_client(cfg)
     _mqtt_connect(client, cfg)
 
@@ -454,7 +410,7 @@ def run_poll(cfg: Dict[str, Any], oneshot: bool = False) -> None:
 
     period_s = float((cfg.get("polling") or {}).get("period_s", 5))
     if oneshot:
-        _poll_once(client, cfg, link)
+        _poll_once(client, cfg)
         client.loop_stop()
         client.disconnect()
         return
@@ -469,7 +425,7 @@ def run_poll(cfg: Dict[str, Any], oneshot: bool = False) -> None:
     log.info("Starting polling loop; period_s=%.3f", period_s)
     while not _stop_evt.is_set():
         start = time.time()
-        _poll_once(client, cfg, link)
+        _poll_once(client, cfg)
         elapsed = time.time() - start
         delay = max(0.0, period_s - elapsed)
         _stop_evt.wait(delay)
