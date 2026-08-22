@@ -81,6 +81,8 @@ Thumbs.db
 
 # Local overrides
 *.local
+# La configurazione e' per installazione: si parte da config.example.yaml
+config.yaml
 
 # ---- Old / backup variants ----
 *.bak

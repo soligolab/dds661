@@ -1,18 +1,27 @@
 
 # dds661.py
-# High-level library for DDS661 Modbus RTU meter (pymodbus-version agnostic).
+# High-level library for DDS661 Modbus meter (RTU seriale, Modbus TCP, RTU-over-TCP).
 #
-# - Uses struct for float32 <-> 2x16bit registers (ABCD: high word then low word).
-# - Compatible with pymodbus variants that use either method="rtu" or framer=ModbusRtuFramer.
-# - Automatically handles slave/unit kwarg differences in read/write calls.
+# - Valori float32 su 2 registri (ABCD: high word poi low word).
+# - Il trasporto e la compatibilita' fra versioni di pymodbus sono in transport.py:
+#   qui si descrive solo la mappa registri e la semantica del dispositivo.
 
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Optional, Dict, Tuple, Any, Callable
-import struct
+from typing import Optional, Dict, Any, Callable
 
-from pymodbus.client import ModbusSerialClient
-from pymodbus.exceptions import ModbusException
+from transport import (
+    LinkConfig,
+    Measure,
+    ModbusSession,
+    TransportConfig,
+    call_read,
+    call_write,
+    coerce,
+    float_to_registers,
+    make_client,
+    registers_to_float,
+)
 
 # ---------------- Register map (addresses are the High Word) ---------------
 REG_BAUD   = 0x0000  # float32 (2 regs)
@@ -29,15 +38,7 @@ IN_E_POS   = 0x0102  # float32
 IN_E_REV   = 0x0103  # float32
 
 # ------------------------------- Dataclasses -------------------------------
-
-@dataclass
-class LinkConfig:
-    port: str = "/dev/ttyCOM1"
-    baudrate: int = 9600
-    parity: str = "E"      # 'E' (Even), 'O', 'N'
-    stopbits: int = 1
-    bytesize: int = 8
-    timeout: float = 1.0
+# LinkConfig e' definita in transport.py e ri-esportata qui per compatibilita'.
 
 @dataclass
 class Params:
@@ -57,88 +58,69 @@ class Measurements:
     e_rev: float
 
 # -------------------------- Float <-> Registers ----------------------------
+# Alias storici verso transport.py (usati da sdm230.py e dalle app).
 
-def _float_to_registers(value: float) -> Tuple[int, int]:
-    b = struct.pack('>f', float(value))  # big-endian float32: b0 b1 b2 b3
-    hi = (b[0] << 8) | b[1]
-    lo = (b[2] << 8) | b[3]
-    return hi, lo
-
-def _registers_to_float(regs: Tuple[int, int]) -> float:
-    hi, lo = int(regs[0]) & 0xFFFF, int(regs[1]) & 0xFFFF
-    b = bytes([(hi >> 8) & 0xFF, hi & 0xFF, (lo >> 8) & 0xFF, lo & 0xFF])
-    return struct.unpack('>f', b)[0]
-
-# ---------------------- pymodbus compat (slave/unit) -----------------------
+_float_to_registers = float_to_registers
+_registers_to_float = registers_to_float
 
 def _call_with_unit(func: Callable[..., Any], *, address: int, count: int, unit_id: int):
-    try:
-        return func(address=address, count=count, slave=unit_id)
-    except TypeError:
-        return func(address=address, count=count, unit=unit_id)
+    return call_read(func, address=address, count=count, unit_id=unit_id)
 
 def _write_with_unit(func: Callable[..., Any], *, address: int, values: list[int], unit_id: int):
-    try:
-        return func(address=address, values=values, slave=unit_id)
-    except TypeError:
-        return func(address=address, values=values, unit=unit_id)
+    return call_write(func, address=address, values=values, unit_id=unit_id)
 
 # --------------------------------- Client ----------------------------------
 
 class DDS661:
-    def __init__(self, link: LinkConfig, unit: int = 1):
-        self.link = link
-        self.unit = int(unit)
+    MANUFACTURER = "DDS"
+    MODEL = "DDS661"
 
-    def _make_client(self) -> ModbusSerialClient:
-        kwargs = dict(
-            port=self.link.port,
-            baudrate=self.link.baudrate,
-            parity=self.link.parity,
-            stopbits=self.link.stopbits,
-            bytesize=self.link.bytesize,
-            timeout=self.link.timeout,
-        )
-        # Prefer new-style framer if available
-        RTUFramer = None
-        try:
-            from pymodbus.framer.rtu_framer import ModbusRtuFramer as RTUFramer  # newer
-        except Exception:
-            try:
-                from pymodbus.framer.rtu import ModbusRtuFramer as RTUFramer      # older 3.x
-            except Exception:
-                RTUFramer = None
-        # Try modern constructor
-        if RTUFramer is not None:
-            try:
-                return ModbusSerialClient(framer=RTUFramer, **kwargs)
-            except TypeError:
-                pass
-        # Fallback to legacy method="rtu"
-        try:
-            return ModbusSerialClient(method="rtu", **kwargs)
-        except TypeError:
-            # Last resort: no framer/method argument accepted
-            return ModbusSerialClient(**kwargs)
+    # Grandezze esposte: il poller e la discovery HA leggono queste, non tabelle globali.
+    MEASURES = (
+        Measure("voltage",  IN_VOLTAGE, "Voltage",       "V",   "voltage"),
+        Measure("current",  IN_CURRENT, "Current",       "A",   "current"),
+        Measure("p_active", IN_P_ACT,   "Active Power",  "W",   "power"),
+        Measure("pf",       IN_PF,      "Power Factor"),
+        Measure("freq",     IN_FREQ,    "Frequency",     "Hz",  "frequency"),
+        Measure("e_total",  IN_E_TOT,   "Energy Total",  "kWh", "energy"),
+        Measure("e_pos",    IN_E_POS,   "Energy Import", "kWh", "energy"),
+        Measure("e_rev",    IN_E_REV,   "Energy Export", "kWh", "energy"),
+    )
+
+    @classmethod
+    def measures(cls, dev_cfg: Optional[Dict[str, Any]] = None) -> tuple:
+        """Grandezze per questo dispositivo. Statiche qui; i driver multicanale
+        (vedi ds18b20.py, mcm260.py) le derivano dalla config del device."""
+        return cls.MEASURES
+
+    def __init__(self, transport: Any, unit: int = 1, dev_cfg: Optional[Dict[str, Any]] = None):
+        # Accetta un TransportConfig, un LinkConfig (=> RTU) o un dict.
+        self.transport = coerce(transport)
+        self.unit = int(unit)
+        self.dev_cfg = dev_cfg or {}
+
+    @property
+    def link(self) -> TransportConfig:
+        """Compatibilita': il vecchio attributo .link esponeva i parametri di trasporto."""
+        return self.transport
+
+    def _make_client(self):
+        return make_client(self.transport)
+
+    def _session(self) -> ModbusSession:
+        return ModbusSession(self.transport, label=f"DDS661 unit={self.unit}")
 
     # ---- params ----
     def read_params(self) -> Params:
-        cli = self._make_client()
-        if not cli.connect():
-            raise RuntimeError("Impossibile aprire la porta seriale")
-        try:
+        with self._session() as ses:
             def _r(addr: int) -> float:
-                rr = _call_with_unit(cli.read_holding_registers, address=addr, count=2, unit_id=self.unit)
-                if rr.isError():
-                    raise ModbusException(rr)
-                return _registers_to_float((rr.registers[0], rr.registers[1]))
+                rr = ses.read_registers(addr, 2, self.unit, input_registers=False)
+                return registers_to_float((rr.registers[0], rr.registers[1]))
             return Params(
                 baud=_r(REG_BAUD),
                 parity=_r(REG_PARITY),
                 slave=_r(REG_SLAVE),
             )
-        finally:
-            cli.close()
 
     def write_params(self, baud: Optional[float] = None,
                      parity: Optional[float] = None,
@@ -146,12 +128,8 @@ class DDS661:
         cur = self.read_params()
         plan = [("slave", REG_SLAVE, slave), ("parity", REG_PARITY, parity), ("baud", REG_BAUD, baud)]
 
-        cli = self._make_client()
-        if not cli.connect():
-            raise RuntimeError("Impossibile aprire la porta seriale")
-
         report: Dict[str, str] = {}
-        try:
+        with self._session() as ses:
             for name, addr, desired in plan:
                 if desired is None:
                     report[name] = "skipped (None)"
@@ -160,38 +138,21 @@ class DDS661:
                 if abs(cur_val - float(desired)) < 1e-6:
                     report[name] = f"unchanged ({desired})"
                     continue
-                hi, lo = _float_to_registers(float(desired))
-                rq = _write_with_unit(cli.write_registers, address=addr, values=[hi, lo], unit_id=self.unit)
+                hi, lo = float_to_registers(float(desired))
+                rq = ses.write_registers(addr, [hi, lo], self.unit)
                 if rq.isError():
                     report[name] = f"ERROR: {rq}"
                 else:
                     report[name] = f"written ({desired})"
                     if name == "slave":
                         self.unit = int(desired)
-            return report
-        finally:
-            cli.close()
+        return report
 
     # ---- measurements ----
+    def read_values(self, dev_cfg: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
+        """Legge tutte le grandezze dichiarate, in un'unica sessione."""
+        with self._session() as ses:
+            return {m.key: ses.read_measure(m, self.unit) for m in self.measures(dev_cfg)}
+
     def read_measurements(self) -> Measurements:
-        cli = self._make_client()
-        if not cli.connect():
-            raise RuntimeError("Impossibile aprire la porta seriale")
-        try:
-            def _rin(addr: int) -> float:
-                rr = _call_with_unit(cli.read_input_registers, address=addr, count=2, unit_id=self.unit)
-                if rr.isError():
-                    return float("nan")
-                return _registers_to_float((rr.registers[0], rr.registers[1]))
-            return Measurements(
-                voltage=_rin(IN_VOLTAGE),
-                current=_rin(IN_CURRENT),
-                p_active=_rin(IN_P_ACT),
-                pf=_rin(IN_PF),
-                freq=_rin(IN_FREQ),
-                e_total=_rin(IN_E_TOT),
-                e_pos=_rin(IN_E_POS),
-                e_rev=_rin(IN_E_REV),
-            )
-        finally:
-            cli.close()
+        return Measurements(**self.read_values())

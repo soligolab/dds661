@@ -1,0 +1,122 @@
+# config.example.yaml — modbus-mqtt-bridge
+# Contatori di energia, sensori di temperatura e moduli I/O Modbus verso MQTT,
+# con discovery per Home Assistant.
+#
+#   cp config.example.yaml config.yaml    e adatta i valori al tuo impianto.
+#
+# config.yaml e' ignorato da git: ogni installazione ha il suo, e un 'git pull'
+# non entra in conflitto con le personalizzazioni. Host, credenziali, unit id e
+# nomi qui sotto sono segnaposto.
+
+serial:
+  port: /dev/ttyUSB0          # meglio un alias udev stabile (es. /dev/ttyEnergyMeter):
+                              # il numero di ttyUSBn puo' cambiare fra un riavvio e l'altro
+  baudrate: 9600
+  parity: E           # E, O, N (deve combaciare con il device)
+  stopbits: 1
+  bytesize: 8
+  timeout: 1.0
+
+mqtt:
+  host: 192.168.0.10          # <- broker MQTT
+  port: 1883
+  client_id: modbus-mqtt-bridge
+  username: CAMBIAMI
+  password: CAMBIAMI
+  keepalive: 30
+  socket_timeout_s: 10.0        # timeout socket MQTT (utile su reti instabili)
+  connect_retries: 0            # 0 = retry infinito, altrimenti numero di tentativi
+  connect_retry_delay_s: 5.0    # attesa tra i tentativi
+  base_topic: modbus
+  topic_style: measurements    # flat | state | measurements (informativo)
+  qos: 0
+  retain: true
+  tls: false                   # true | false | oppure dict: {enabled: true, ca_certs: ..., certfile: ..., keyfile: ...}
+
+home_assistant:
+  enabled: true
+  discovery_prefix: homeassistant
+  # area: "Quadro elettrico"   # opzionale
+
+polling:
+  period_s: 1.0                 # era 'interval_s' nel vecchio file
+  read_mode: sequential         # sequential | bulk
+  per_measure_delay_ms: 80      # ritardo tra letture di singole misure
+  delay_ms_between_devices: 80  # ritardo tra dispositivi
+  debug_log: false              # stampa JSON per-device sul log
+  reconnect_each_read: false    # true = riapre la connessione a ogni misura (bus instabili)
+
+devices:
+  # Contatori sulla seriale locale: una voce per ogni unit id sul bus.
+  - id: 1
+    type: sdm230
+    name: "Contatore Generale"
+  - id: 10
+    type: dds661
+    name: "Contatore Secondario"
+
+  # ---- dietro il DR302, bus a 57600 8N1 ----
+
+  # Lettore temperature DS18B20, 12 canali. Attenzione: id 10 e' anche il "Contatore
+  # Secondario" qui sopra: i due convivono perche' stanno su bus diversi, ma servono 'uid:'
+  # (identita' Home Assistant) e, da riga di comando, --device invece di --slave.
+  - id: 10
+    type: ds18b20
+    name: "Temperature"
+    uid: temp_casa
+    link: dr302
+    read_mode: bulk             # 13 registri contigui in una sola transazione
+    channels:                   # solo i canali elencati vengono pubblicati;
+      1: "Sonda 1"              # un canale senza sonda pubblica NaN, non 0,00 gradi
+      2: "Sonda 2"
+      3: "Sonda 3"
+      4: "Sonda 4"
+
+  # Modulo I/O Pixsys: 16 ingressi digitali in un solo registro, uno per bit.
+  # Logica invertita (bit a 1 = contatto chiuso): e' il default, si cambia con 'invert'.
+  - id: 5
+    type: mcm260
+    name: "Ingressi"
+    uid: mcm260_ingressi
+    link: dr302
+    read_mode: bulk
+    inputs:                     # bit: {name, device_class}
+      0:  {name: "Finestra 1",  device_class: window}
+      1:  {name: "Finestra 2",  device_class: window}
+      2:  {name: "Porta",       device_class: door}
+      8:  {name: "Sensore PIR", device_class: occupancy}
+
+# Default Modbus TCP globali (bridge CNV520-21AD)
+tcp:
+  host: 192.168.0.99
+  port: 502
+  timeout: 1.0
+
+# Trasporti con nome: un device li referenzia con 'link: <nome>'.
+# Utile quando piu' contatori stanno sullo stesso bus/gateway: host e porta si scrivono una volta.
+links:
+  # USR-DR302 (Ethernet <-> RS485) in modalita' TRASPARENTE: le trame Modbus RTU con
+  # CRC16 viaggiano dentro il socket TCP.
+  # Sul bus: lettore temperature DS18B20 (slave 10) e modulo I/O MCM260 (slave 5).
+  # Lato gateway: TCP Server, porta 502, linea 57600 8N1, "Modbus TCP" e
+  # "Similar RFC2217" DISATTIVATE.
+  # La linea e' 57600 8N1 perche' e' quella del lettore temperature: i contatori a 8E1
+  # non possono condividere questo bus, ed e' il motivo per cui restano sulla seriale locale.
+  dr302:
+    protocol: rtutcp
+    host: 192.168.0.20          # <- IP del gateway
+    port: 502
+    timeout: 1.5                # piu' generoso: latenza rete + turnaround RS485
+    retries: 1                  # una misura persa la si riprende al ciclo dopo:
+                                # col default di pymodbus (3) un device muto costa
+                                # 8 misure x 4 tentativi x timeout = oltre 30 s di stallo
+
+  # Stesso hardware con la CONVERSIONE di protocollo attiva sul gateway ("Modbus TCP"):
+  # parlerebbe Modbus TCP vero, header MBAP. Non in uso, tenuto per riferimento.
+  dr302_gw:
+    protocol: tcp
+    host: 192.168.0.20          # <- IP del gateway
+    port: 502
+    timeout: 1.5
+    retries: 1
+

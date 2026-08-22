@@ -1,0 +1,14 @@
+[Unit]
+Description=DDS661 Polling Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/dds661
+ExecStart=/root/dds661/.venv/bin/python3 /root/dds661/polling.py --config /root/dds661/config.yaml
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
