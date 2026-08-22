@@ -1,9 +1,16 @@
-# config.yaml — modbus-mqtt-bridge
+# config.example.yaml — modbus-mqtt-bridge
 # Contatori di energia, sensori di temperatura e moduli I/O Modbus verso MQTT,
 # con discovery per Home Assistant.
+#
+#   cp config.example.yaml config.yaml    e adatta i valori al tuo impianto.
+#
+# config.yaml e' ignorato da git: ogni installazione ha il suo, e un 'git pull'
+# non entra in conflitto con le personalizzazioni. Host, credenziali, unit id e
+# nomi qui sotto sono segnaposto.
 
 serial:
-  port: /dev/ttyUSB0
+  port: /dev/ttyUSB0          # meglio un alias udev stabile (es. /dev/ttyEnergyMeter):
+                              # il numero di ttyUSBn puo' cambiare fra un riavvio e l'altro
   baudrate: 9600
   parity: E           # E, O, N (deve combaciare con il device)
   stopbits: 1
@@ -11,13 +18,13 @@ serial:
   timeout: 1.0
 
 mqtt:
-  host: 192.168.1.6
+  host: 192.168.0.10          # <- broker MQTT
   port: 1883
   client_id: modbus-mqtt-bridge
-  username: mqttuser
-  password: mqttpass
+  username: CAMBIAMI
+  password: CAMBIAMI
   keepalive: 30
-  socket_timeout_s: 10.0        # timeout socket MQTT (utile per debug/reti instabili)
+  socket_timeout_s: 10.0        # timeout socket MQTT (utile su reti instabili)
   connect_retries: 0            # 0 = retry infinito, altrimenti numero di tentativi
   connect_retry_delay_s: 5.0    # attesa tra i tentativi
   base_topic: modbus
@@ -40,48 +47,44 @@ polling:
   reconnect_each_read: false    # true = riapre la connessione a ogni misura (bus instabili)
 
 devices:
+  # Contatori sulla seriale locale: una voce per ogni unit id sul bus.
+  - id: 1
+    type: sdm230
+    name: "Contatore Generale"
   - id: 10
     type: dds661
-    name: "Contatore Rack Garage"
-  - id: 11
-    type: dds661
-    name: "Contatore Rack PianoSuperiore"
+    name: "Contatore Secondario"
 
   # ---- dietro il DR302, bus a 57600 8N1 ----
 
   # Lettore temperature DS18B20, 12 canali. Attenzione: id 10 e' anche il "Contatore
-  # Cucina" qui sopra: i due convivono perche' stanno su bus diversi, ma servono 'uid:'
+  # Secondario" qui sopra: i due convivono perche' stanno su bus diversi, ma servono 'uid:'
   # (identita' Home Assistant) e, da riga di comando, --device invece di --slave.
   - id: 10
     type: ds18b20
-    name: "Temperature Casa"
+    name: "Temperature"
     uid: temp_casa
     link: dr302
     read_mode: bulk             # 13 registri contigui in una sola transazione
     channels:                   # solo i canali elencati vengono pubblicati;
-      1: "Soggiorno"            # un canale senza sonda pubblica NaN, non 0,00 gradi
-      2: "Cucina"
-      3: "Lavanderia"
-      4: "Esterno Nord"
+      1: "Sonda 1"              # un canale senza sonda pubblica NaN, non 0,00 gradi
+      2: "Sonda 2"
+      3: "Sonda 3"
+      4: "Sonda 4"
 
   # Modulo I/O Pixsys: 16 ingressi digitali in un solo registro, uno per bit.
   # Logica invertita (bit a 1 = contatto chiuso): e' il default, si cambia con 'invert'.
   - id: 5
     type: mcm260
-    name: "MCM260 Soggiorno"
-    uid: mcm260_soggiorno
+    name: "Ingressi"
+    uid: mcm260_ingressi
     link: dr302
     read_mode: bulk
     inputs:                     # bit: {name, device_class}
-      0:  {name: "Finestra Cucina DX",         device_class: window}
-      1:  {name: "Finestra Cucina SX",         device_class: window}
-      2:  {name: "Portoncino Disimpegno",      device_class: door}
-      3:  {name: "Finestra Bagno Terra",       device_class: window}
-      4:  {name: "Perimetrale Nord Est",       device_class: occupancy}
-      8:  {name: "Portafinestra Soggiorno SX", device_class: window}
-      9:  {name: "Portafinestra Soggiorno DX", device_class: window}
-      10: {name: "Portafinestra Lavanderia",   device_class: window}
-      11: {name: "Perimetrale Nord Ovest",     device_class: occupancy}
+      0:  {name: "Finestra 1",  device_class: window}
+      1:  {name: "Finestra 2",  device_class: window}
+      2:  {name: "Porta",       device_class: door}
+      8:  {name: "Sensore PIR", device_class: occupancy}
 
 # Default Modbus TCP globali (bridge CNV520-21AD)
 tcp:
@@ -101,7 +104,7 @@ links:
   # non possono condividere questo bus, ed e' il motivo per cui restano sulla seriale locale.
   dr302:
     protocol: rtutcp
-    host: 192.168.1.177
+    host: 192.168.0.20          # <- IP del gateway
     port: 502
     timeout: 1.5                # piu' generoso: latenza rete + turnaround RS485
     retries: 1                  # una misura persa la si riprende al ciclo dopo:
@@ -112,7 +115,7 @@ links:
   # parlerebbe Modbus TCP vero, header MBAP. Non in uso, tenuto per riferimento.
   dr302_gw:
     protocol: tcp
-    host: 192.168.1.177
+    host: 192.168.0.20          # <- IP del gateway
     port: 502
     timeout: 1.5
     retries: 1

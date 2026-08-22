@@ -14,7 +14,10 @@ Tre trasporti: seriale RTU, Modbus TCP e RTU-over-TCP (gateway trasparenti tipo 
 - `mcm260.py` — driver modulo I/O Pixsys MCM260 (ingressi digitali → binary sensor)
 - `polling.py` — poller multi-dispositivo → MQTT/HA
 - `meter.py` — CLI per singolo device (lettura/scrittura/`probe`)
-- `config.yaml` — configurazione
+- `config.example.yaml` — configurazione di esempio, da copiare in `config.yaml`
+- `install.sh` — crea il virtualenv e installa le dipendenze
+- `service/` — unit systemd per l'avvio automatico
+- `tests/` — verifica offline su gateway emulato (vedi [Test](#test))
 
 ## Requisiti
 ```bash
@@ -36,24 +39,33 @@ Esempio per container Proxmox dove il repository è in `/root/dds661`.
    . .venv/bin/activate
    pip install -r requirements.txt
    ```
-3. **Configura il servizio systemd**
+3. **Prepara la configurazione**
+   ```bash
+   cp config.example.yaml config.yaml
+   ```
+   `config.yaml` è ignorato da git: ogni installazione ha il suo, e i `git pull`
+   successivi non entrano in conflitto con le personalizzazioni.
+4. **Configura il servizio systemd**
    ```bash
    cp service/dds661-polling.service /etc/systemd/system/dds661-polling.service
    systemctl daemon-reload
    ```
-4. **Abilita e avvia il servizio**
+5. **Abilita e avvia il servizio**
    ```bash
    systemctl enable --now dds661-polling.service
    ```
-5. **Verifica lo stato**
+6. **Verifica lo stato**
    ```bash
    systemctl status dds661-polling.service
    ```
 
-> Assicurati di aggiornare `config.yaml` in base alle tue porte Modbus e alle credenziali MQTT.
+> L'unit conserva il nome storico `dds661-polling`: cambiarlo su un'installazione
+> esistente vorrebbe dire disabilitare la vecchia unit prima di installare la nuova,
+> e non vale il disturbo.
 
-## Configurazione (adattata al tuo setup)
-Vedi `config.yaml` incluso. Differenze rispetto al file storico:
+## Configurazione
+Si parte da `config.example.yaml`, che documenta ogni chiave; `config.yaml` resta
+locale all'installazione. Differenze rispetto al file storico:
 - `polling.period_s` sostituisce `polling.interval_s` (qui impostato a **1.0** secondi).
 - Aggiunto SDM230 con `id: 1` e `name: "Contatore F.M"`.
 - Gli altri dispositivi (`10..13`) sono marcati `type: dds661`.
@@ -201,6 +213,26 @@ Si cerca la colonna che produce valori sensati: qui `i16*0.1` dà temperature pl
 contiene l'indirizzo noto (10) e `0x00FF` il codice enum della velocità impostata. È sola lettura, e
 se nessun function code risponde il problema è la linea (baud/parità del gateway, indirizzo,
 cablaggio A/B), non la mappa.
+
+## Test
+
+Verifica senza hardware, contro un gateway Modbus emulato che riproduce i tre
+dispositivi reali (SDM230, DS18B20 a 12 canali, MCM260) su due framer — RTU sulla
+porta 15020, come un DR302 trasparente, e SOCKET sulla 15021, come un gateway che
+converte in Modbus TCP:
+
+```bash
+bash tests/run_all.sh
+```
+
+Coprono i casi che il campo non offre: temperatura negativa, sonda staccata (che
+deve dare `NaN`, non 0,00 °C), gateway che cade e torna, device muto.
+`tests/test_devices.py` confronta inoltre chiavi e indirizzi dei contatori con la
+`ADDR_MAP` di `48d0394`, l'ultimo commit prima del refactor: è il controllo che la
+generalizzazione del vocabolario misure non abbia spostato nulla di ciò che era
+già in produzione.
+
+`tests/hardware/` è fuori dal runner: quelle misure vogliono il DR302 vero.
 
 ## Troubleshooting
 - **NaN nelle misure** → controlla baud/parità/stop, terminazioni, ID corretto; le misure usano gli **input registers** (0x04).
