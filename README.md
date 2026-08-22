@@ -1,4 +1,4 @@
-# Generic Modbus Devices (contatori + sensori)
+# modbus-mqtt-bridge
 
 Tooling per leggere dispositivi Modbus e pubblicarli su MQTT con discovery per Home Assistant:
 contatori di energia **DDS661** e **Eastron SDM230**, lettore temperature **DS18B20-RS485** a 12

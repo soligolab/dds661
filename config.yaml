@@ -1,6 +1,6 @@
-# config.yaml — Generic Modbus meters (DDS661 + SDM230)
-# Adattato dal tuo file precedente. Aggiunto SDM230 id=1 come "Contatore F.M".
-# Nota: 'period_s' sostituisce il vecchio 'interval_s'.
+# config.yaml — modbus-mqtt-bridge
+# Contatori di energia, sensori di temperatura e moduli I/O Modbus verso MQTT,
+# con discovery per Home Assistant.
 
 serial:
   port: /dev/ttyUSB0
@@ -13,11 +13,11 @@ serial:
 mqtt:
   host: 192.168.1.6
   port: 1883
-  client_id: dds661-bridge
+  client_id: modbus-mqtt-bridge
   username: mqttuser
   password: mqttpass
   keepalive: 30
-  base_topic: dds661
+  base_topic: modbus
   topic_style: measurements    # flat | state | measurements (informativo)
   qos: 0
   retain: true

@@ -2,8 +2,9 @@
 """
 polling.py
 -----------
-Generic Modbus poller for multiple meter types (DDS661, SDM230) defined in a YAML config.
-Publishes to MQTT (Home Assistant discovery optional).
+modbus-mqtt-bridge: poller per dispositivi Modbus descritti in un YAML
+(contatori di energia, sensori di temperatura, moduli I/O).
+Pubblica su MQTT, con discovery Home Assistant opzionale.
 
 Config (example):
 -----------------
@@ -30,8 +31,8 @@ links:                     # trasporti con nome, referenziati da 'link:' nel dev
 mqtt:
   host: 127.0.0.1
   port: 1883
-  client_id: "meters-poller"
-  base_topic: "energy"
+  client_id: "modbus-mqtt-bridge"
+  base_topic: "modbus"
   qos: 0
   retain: true
   tls:
@@ -142,8 +143,8 @@ def _load_yaml(path: str) -> Dict[str, Any]:
 
 def _mqtt_client(cfg: Dict[str, Any]) -> mqtt.Client:
     m = cfg.get("mqtt", {}) if isinstance(cfg, dict) else {}
-    client_id = m.get("client_id", "meters-poller")
-    base_topic = m.get("base_topic", "energy")
+    client_id = m.get("client_id", "modbus-mqtt-bridge")
+    base_topic = m.get("base_topic", "modbus")
     qos = int(m.get("qos", 0))
 
     try:
@@ -239,7 +240,7 @@ def _ha_publish_discovery(client: mqtt.Client, cfg: Dict[str, Any]) -> None:
         return
 
     m = cfg.get("mqtt", {}) if isinstance(cfg, dict) else {}
-    base_topic = m.get("base_topic", "energy")
+    base_topic = m.get("base_topic", "modbus")
     qos = int(m.get("qos", 0))
     retain = bool(m.get("retain", True))
     dprefix = ha.get("discovery_prefix", "homeassistant")
@@ -340,7 +341,7 @@ def _handle_sigterm(signum, frame):
 
 def _poll_once(client: mqtt.Client, cfg: Dict[str, Any]) -> None:
     m = cfg.get("mqtt", {}) if isinstance(cfg, dict) else {}
-    base_topic = m.get("base_topic", "energy")
+    base_topic = m.get("base_topic", "modbus")
     qos = int(m.get("qos", 0))
     retain = bool(m.get("retain", True))
 
@@ -434,7 +435,7 @@ def run_poll(cfg: Dict[str, Any], oneshot: bool = False) -> None:
     client.disconnect()
 
 def main():
-    ap = argparse.ArgumentParser(description="Generic Modbus meters poller (DDS661, SDM230).")
+    ap = argparse.ArgumentParser(description="modbus-mqtt-bridge: poller Modbus verso MQTT/Home Assistant.")
     ap.add_argument("--config", required=True, help="YAML config file")
     ap.add_argument("--oneshot", action="store_true", help="Read/publish once and exit")
     ap.add_argument("--log", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
