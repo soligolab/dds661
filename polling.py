@@ -70,6 +70,7 @@ import argparse
 import errno
 import json
 import logging
+import math
 import socket
 import signal
 import sys
@@ -301,22 +302,37 @@ def _ha_publish_discovery(client: mqtt.Client, cfg: Dict[str, Any]) -> None:
         device = _ha_device(unique_base, name, area, cls.MODEL, cls.MANUFACTURER)
 
         state_topic = f"{base_topic}/{_topic_key(name, unit_id)}/state"
-        availability = {"topic": f"{base_topic}/status"}
+        status_avty = {"topic": f"{base_topic}/status"}
 
         for m in cls.measures(d):
             comp = m.component
             unique_id = f"{unique_base}_{m.key}"
             obj_id = f"{unique_id}"
             binary = comp == "binary_sensor"
+            # Una misura che il dispositivo non fornisce - sonda staccata, device muto -
+            # viaggia come 'null'. Due accorgimenti perche' non diventi un valore falso:
+            # il template non produce nulla, cosi' lo stato non viene aggiornato; e una
+            # seconda sorgente di availability, valutata sullo stesso topic di stato,
+            # rende l'entita' non disponibile invece di lasciarla ferma sull'ultima
+            # lettura buona. Senza, '| float' su null darebbe 0.0: per una temperatura
+            # e' un valore perfettamente plausibile e completamente inventato.
+            cast = "" if binary else " | float"
+            value_avty = {
+                "topic": state_topic,
+                "value_template": ("{{ 'offline' if value_json." + m.key
+                                   + " is none else 'online' }}"),
+            }
             cfg_payload = {
                 "name": f"{name} {m.label}",
                 "uniq_id": unique_id,
                 "stat_t": state_topic,
-                "avty": [availability],
+                "avty": [status_avty, value_avty],
+                "avty_mode": "all",
                 # I binary_sensor pubblicano 0/1 interi e si confrontano con pl_on/pl_off;
                 # i sensori numerici passano da '| float'.
-                "val_tpl": (f"{{{{ value_json.{m.key} }}}}" if binary
-                            else f"{{{{ value_json.{m.key} | float }}}}"),
+                "val_tpl": ("{% if value_json." + m.key + " is not none %}"
+                            "{{ value_json." + m.key + cast + " }}"
+                            "{% endif %}"),
                 "dev": device,
             }
             if binary:
@@ -331,6 +347,16 @@ def _ha_publish_discovery(client: mqtt.Client, cfg: Dict[str, Any]) -> None:
 
             topic = f"{dprefix}/{comp}/{obj_id}/config"
             client.publish(topic, json.dumps(cfg_payload, ensure_ascii=False), qos=qos, retain=retain)
+
+def _json_safe(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Sostituisce NaN e infiniti con None, cioe' 'null'.
+
+    JSON non prevede NaN: json.dumps lo emetterebbe lo stesso, ma e' un'estensione
+    di Python e i parser rigorosi (JSON.parse, jq, Node-RED) rifiutano il messaggio
+    intero. 'null' e' il modo canonico di dire "questa misura non c'e'".
+    """
+    return {k: (None if isinstance(v, float) and not math.isfinite(v) else v)
+            for k, v in payload.items()}
 
 # ------------------------------- Reading ------------------------------------
 # Il trasporto (rtu / tcp / rtutcp) e' risolto per dispositivo da
@@ -438,7 +464,10 @@ def _poll_once(client: mqtt.Client, cfg: Dict[str, Any]) -> None:
                 log.info(json.dumps(dbg, ensure_ascii=False, indent=2))
 
             topic = f"{base_topic}/{_topic_key(name, unit_id)}/state"
-            client.publish(topic, json.dumps(payload, ensure_ascii=False), qos=qos, retain=retain)
+            # allow_nan=False: se un NaN sfuggisse a _json_safe si vuole un errore
+            # rumoroso, non un payload che i consumatori scartano in silenzio.
+            client.publish(topic, json.dumps(_json_safe(payload), ensure_ascii=False,
+                                             allow_nan=False), qos=qos, retain=retain)
         except Exception as e:
             log.error("Read/publish failed for unit %s: %s", d.get("id"), e)
         finally:

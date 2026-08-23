@@ -47,9 +47,15 @@ cmp("sequential reconnect-each-read", polling._read_device_sequential(
 
 print("4) _poll_once completo con client MQTT finto")
 published = []
+def _no_nan(token):
+    # NaN e Infinity non fanno parte di JSON: json.loads di Python li accetta come
+    # estensione, ma i consumatori veri (JSON.parse, jq) rifiutano il messaggio.
+    # Qui devono far fallire la suite.
+    raise ValueError(f"token non-JSON nel payload MQTT: {token}")
+
 class FakeMqtt:
     def publish(self, topic, payload, qos=0, retain=False):
-        published.append((topic, json.loads(payload)))
+        published.append((topic, json.loads(payload, parse_constant=_no_nan)))
 polling._poll_once(FakeMqtt(), CFG)
 for topic, payload in published:
     cmp(f"publish {topic}", payload)
@@ -72,9 +78,12 @@ bad_cfg = {**CFG, "links": {**CFG["links"], "morto": {"protocol": "rtutcp", "hos
            "devices": [{"id": 99, "type": "sdm230", "name": "Assente", "link": "morto"}]}
 polling._poll_once(FakeMqtt(), bad_cfg)
 nan_payload = published[0][1] if published else {}
-all_nan = all(str(nan_payload.get(k)) == "nan" for k in [m.key for m in polling.DRIVERS['sdm230'].measures()])
-print(f"  publish emesso={bool(published)} tutte NaN={all_nan}")
-if not published or not all_nan: fails.append("gestione device assente")
+keys = [m.key for m in polling.DRIVERS['sdm230'].measures()]
+# Una misura assente viaggia come 'null', non come NaN: il payload resta JSON valido
+# e chi lo legge distingue "non misurato" da "misurato zero".
+all_null = bool(keys) and all(k in nan_payload and nan_payload[k] is None for k in keys)
+print(f"  publish emesso={bool(published)} tutte null={all_null}")
+if not published or not all_null: fails.append("gestione device assente")
 
 print("\nRISULTATO:", "tutti i controlli superati" if not fails else f"FALLITI: {fails}")
 sys.exit(1 if fails else 0)

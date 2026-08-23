@@ -52,9 +52,15 @@ check("sequenziale = 3 canali + 1 maschera di presenza", n_seq == 4, f"{n_seq}")
 
 print("\n5) _poll_once: payload")
 published = []
+def _no_nan(token):
+    # NaN e Infinity non fanno parte di JSON: json.loads di Python li accetta come
+    # estensione, ma i consumatori veri (JSON.parse, jq) rifiutano il messaggio.
+    # Qui devono far fallire la suite.
+    raise ValueError(f"token non-JSON nel payload MQTT: {token}")
+
 class FakeMqtt:
     def publish(self, topic, payload, qos=0, retain=False):
-        published.append((topic, json.loads(payload)))
+        published.append((topic, json.loads(payload, parse_constant=_no_nan)))
 polling._poll_once(FakeMqtt(), CFG)
 by_topic = dict(published)
 
@@ -89,7 +95,8 @@ for key, label, unit, dcla in OLD_SENSORS:
     if p is None: bad.append(f"{key}: topic mancante"); continue
     want = {"name": f"Contatore F.M {label}", "uniq_id": f"sdm230_{METER_UNIT}_{key}",
             "stat_t": "dds661/contatore-f-m/state",
-            "val_tpl": "{{ value_json.%s | float }}" % key}
+            "val_tpl": ("{%% if value_json.%s is not none %%}"
+                        "{{ value_json.%s | float }}{%% endif %%}" % (key, key))}
     for k, v in want.items():
         if p.get(k) != v: bad.append(f"{key}.{k}: {p.get(k)!r} != {v!r}")
     if unit and p.get("unit_of_meas") != unit: bad.append(f"{key}.unit")
@@ -114,7 +121,8 @@ check("MCM260: pubblicato come binary_sensor", bs is not None,
 if bs:
     check("MCM260: pl_on/pl_off e template senza '| float'",
           bs.get("pl_on") == "1" and bs.get("pl_off") == "0"
-          and bs["val_tpl"] == "{{ value_json.di0 }}", json.dumps(bs)[:120])
+          and bs["val_tpl"] == ("{% if value_json.di0 is not none %}"
+                                "{{ value_json.di0 }}{% endif %}"), json.dumps(bs)[:160])
     check("MCM260: device_class e nome", bs.get("dev_cla") == "window"
           and bs["name"] == "IO Soggiorno Finestra", bs["name"])
 io_payload = by_topic.get("dds661/io-soggiorno/state", {})
@@ -133,6 +141,36 @@ polling.log.removeHandler(h)
 out = logbuf.getvalue()
 check("uid duplicato -> errore in log", "uid duplicato" in out, out.strip()[:80])
 check("tipo sconosciuto -> errore in log", "sconosciuto" in out)
+
+print("\n5d) Misura assente: 'null', non NaN")
+# Il canale 4 e' dichiarato ma non ha sonda: e' il caso in cui il driver produce NaN.
+cfg_nan = {**CFG, "devices": [{**CFG["devices"][1],
+                               "channels": {1: "Mandata", 4: "Nessuna sonda"}}]}
+raw = []
+class RawMqtt:
+    def publish(self, topic, payload, qos=0, retain=False): raw.append((topic, payload))
+polling._poll_once(RawMqtt(), cfg_nan)
+body = next((p for t, p in raw if t.endswith("/state")), "")
+
+check("payload senza il token NaN", "NaN" not in body, body[:120])
+try:
+    parsed = json.loads(body, parse_constant=_no_nan)
+    ok_parse, why = True, ""
+except Exception as e:
+    parsed, ok_parse, why = {}, False, str(e)
+check("payload accettato da un parser JSON rigoroso", ok_parse, why)
+check("il canale senza sonda e' null", "t4" in parsed and parsed["t4"] is None, str(parsed))
+check("il canale con sonda conserva il valore", parsed.get("t1") == TEMP_EXPECTED[1], str(parsed.get("t1")))
+
+published.clear()
+polling._ha_publish_discovery(FakeMqtt(), cfg_nan)
+d4 = dict(published).get("homeassistant/sensor/temp_soggiorno_t4/config", {})
+avty = d4.get("avty", [])
+check("discovery: availability anche sul topic di stato", len(avty) == 2 and
+      avty[1].get("topic") == "dds661/temperature-soggiorno/state", str(avty))
+check("discovery: avty_mode 'all'", d4.get("avty_mode") == "all", str(d4.get("avty_mode")))
+check("discovery: il template non produce nulla se la misura e' null",
+      d4.get("val_tpl", "").startswith("{% if value_json.t4 is not none %}"), d4.get("val_tpl", ""))
 
 print("\n6) meter.py: selezione del device con id ambiguo")
 cfg_file = os.path.join(tempfile.mkdtemp(prefix="mmb-test-"), "cfg_ambiguo.yaml")

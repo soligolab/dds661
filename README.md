@@ -102,6 +102,14 @@ Per ogni device:
 ```
 Payload JSON con: `voltage`, `current`, `p_active`, `pf`, `freq`, `e_total`, `e_pos`, `e_rev`.
 
+Una misura che il dispositivo non fornisce — sonda staccata, device muto — vale **`null`**, mai
+`0`. Non è `NaN`: JSON non lo prevede, e benché `json.dumps` di Python lo emetta lo stesso come
+estensione, un parser rigoroso (`JSON.parse`, `jq`, Node-RED) rifiuta il messaggio intero.
+In Home Assistant un `null` rende l'entità **non disponibile**: il template di stato non produce
+nulla e una seconda sorgente di `availability`, valutata sul topic di stato, la marca offline.
+Senza questi due accorgimenti `| float` su `null` darebbe `0.0`, cioè per una temperatura un
+valore plausibile e inventato.
+
 > `mqtt.topic_style` è informativo al momento; la pubblicazione standard usa sempre `/state`.
 
 ## Esecuzione — CLI singolo device
@@ -144,7 +152,7 @@ sole sonde sui canali 1 e 2; scala 0,01 confermata dai valori letti e dalla tras
 `divide100` della precedente configurazione openHAB.
 
 **Un canale senza sonda legge 0**, indistinguibile da 0,00 °C: il driver applica sempre la maschera
-di presenza e pubblica `NaN`. Vale anche in modalità `sequential`, al costo di una lettura in più.
+di presenza e pubblica `null`. Vale anche in modalità `sequential`, al costo di una lettura in più.
 
 ```yaml
 - id: 10
@@ -226,7 +234,7 @@ bash tests/run_all.sh
 ```
 
 Coprono i casi che il campo non offre: temperatura negativa, sonda staccata (che
-deve dare `NaN`, non 0,00 °C), gateway che cade e torna, device muto.
+deve dare `null`, non 0,00 °C), gateway che cade e torna, device muto.
 `tests/test_devices.py` confronta inoltre chiavi e indirizzi dei contatori con la
 `ADDR_MAP` di `48d0394`, l'ultimo commit prima del refactor: è il controllo che la
 generalizzazione del vocabolario misure non abbia spostato nulla di ciò che era
@@ -235,7 +243,8 @@ già in produzione.
 `tests/hardware/` è fuori dal runner: quelle misure vogliono il DR302 vero.
 
 ## Troubleshooting
-- **NaN nelle misure** → controlla baud/parità/stop, terminazioni, ID corretto; le misure usano gli **input registers** (0x04).
+- **`null` nelle misure** → controlla baud/parità/stop, terminazioni, ID corretto; le misure usano gli **input registers** (0x04).
+  In Home Assistant l'entità risulta non disponibile, che è il comportamento voluto: meglio un buco dichiarato di uno zero inventato.
 - **MQTT** → verifica host/porta/credenziali/TLS; gestione compatibile Paho v1/v2.
 - **`OSError: [Errno 101] Network is unreachable`** → la rete del container/host non ha route verso il broker.
   - Verifica gateway/interfaccia con `ip route` e connettività verso il broker (`ping <host>`, `nc -vz <host> 1883`).
