@@ -1,0 +1,14 @@
+[Unit]
+Description=Tuya MQTT Bridge (controllo locale, senza cloud)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/dds661
+ExecStart=/root/dds661/.venv/bin/python3 /root/dds661/tuya_bridge.py --config /root/dds661/config.yaml
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target

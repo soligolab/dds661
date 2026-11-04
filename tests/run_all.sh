@@ -10,7 +10,7 @@ PY="${PYTHON:-$ROOT/.venv/bin/python}"
 
 # test_resilienza uccide e riavvia l'emulatore: va per ultima, e la pulizia
 # finale va fatta per porta, non sul PID che abbiamo lanciato noi.
-SUITES=(test_devices.py test_polling.py test_poller_ha.py test_resilienza.py)
+SUITES=(test_tuya.py test_devices.py test_polling.py test_poller_ha.py test_resilienza.py)
 
 kill_gateway() {
   local pids

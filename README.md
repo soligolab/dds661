@@ -4,6 +4,7 @@ Tooling per leggere dispositivi Modbus e pubblicarli su MQTT con discovery per H
 contatori di energia **DDS661** e **Eastron SDM230**, lettore temperature **DS18B20-RS485** a 12
 canali, modulo I/O **Pixsys MCM260**.
 Tre trasporti: seriale RTU, Modbus TCP e RTU-over-TCP (gateway trasparenti tipo USR-DR302).
+Sullo stesso broker, un secondo servizio pubblica i dispositivi **Tuya Wi-Fi** in locale.
 
 ## File
 - `transport.py` — trasporto Modbus (`rtu` / `tcp` / `rtutcp`), codec dei valori, descrittore `Measure`
@@ -14,6 +15,8 @@ Tre trasporti: seriale RTU, Modbus TCP e RTU-over-TCP (gateway trasparenti tipo 
 - `mcm260.py` — driver modulo I/O Pixsys MCM260 (ingressi digitali → binary sensor)
 - `polling.py` — poller multi-dispositivo → MQTT/HA
 - `meter.py` — CLI per singolo device (lettura/scrittura/`probe`)
+- `tuya_bridge.py` — ponte Tuya Wi-Fi locale → MQTT (vedi [Ponte Tuya](#ponte-tuya-wi-fi--mqtt-tuya_bridgepy))
+- `tuya_cloud.py` — genera `tuya-devices.yaml` (datapoint e local key) dal cloud Tuya, una tantum
 - `config.example.yaml` — configurazione di esempio, da copiare in `config.yaml`
 - `install.sh` — crea il virtualenv e installa le dipendenze
 - `service/` — unit systemd per l'avvio automatico
@@ -221,6 +224,73 @@ Si cerca la colonna che produce valori sensati: qui `i16*0.1` dà temperature pl
 contiene l'indirizzo noto (10) e `0x00FF` il codice enum della velocità impostata. È sola lettura, e
 se nessun function code risponde il problema è la linea (baud/parità del gateway, indirizzo,
 cablaggio A/B), non la mappa.
+
+## Ponte Tuya Wi-Fi → MQTT (`tuya_bridge.py`)
+
+Dispositivi Tuya Wi-Fi (termostati, prese con misura, robot) letti e comandati **in locale**,
+sulla porta 6668, senza passare dal cloud. Gira come servizio a parte (`tuya-mqtt-bridge`)
+sullo stesso broker del poller Modbus, con base topic `tuya`.
+
+| Topic | Contenuto |
+|---|---|
+| `tuya/status` | `online`/`offline` del ponte (LWT, retained) |
+| `tuya/<topic>/state` | JSON con tutti i datapoint per codice, già scalati, più `online` e `ts` (retained) |
+| `tuya/<topic>/availability` | `online`/`offline` del singolo dispositivo (retained) |
+| `tuya/<topic>/set` | JSON `{"<codice>": valore}`: scrittura |
+| `tuya/<topic>/get` | qualunque payload: rilettura immediata |
+
+```bash
+mosquitto_pub -t tuya/termostato-soggiorno/set -m '{"temp_set": 20.5}'
+```
+
+Un comando con un codice in sola lettura, fuori range, di tipo sbagliato o in
+`deny_codes` viene scartato **per intero** e finisce nel log. I default bloccano reset di fabbrica, reset Wi-Fi,
+azzeramento contatori, formattazione SD e password: il broker è aperto alla LAN.
+
+### Da dove vengono dispositivi e chiavi
+
+Il protocollo locale usa numeri (`"16": 210`); nomi, tipi e scale dei datapoint
+li conosce solo il cloud. `tuya_cloud.py` li legge **una volta** (serve un progetto
+sulla Tuya IoT Platform con IoT Core attivo) e scrive `tuya-devices.yaml`:
+
+```bash
+python3 tuya_cloud.py --credentials ~/.tuya-credentials --out tuya-devices.yaml \
+    --topic <device_id>=termostato-soggiorno ...
+```
+
+Il file contiene le **local key**: è in `.gitignore` e nasce con permessi 600.
+Va rigenerato quando si aggiunge un dispositivo o se ne riaccoppia uno all'app:
+il riaccoppiamento cambia la chiave. `tuya_cloud.py` usa solo la libreria standard,
+quindi gira anche fuori dal venv, dove stanno le credenziali.
+
+Le correzioni al modello cloud stanno in `config.yaml`, `tuya.overrides`, e non
+nel file generato, così sopravvivono alla rigenerazione. Esempio: termostati che
+dichiarano scala 0 ma lavorano a mezzi gradi (`{factor: 0.5}`).
+
+### Indirizzi
+
+Con `ip: auto` l'indirizzo e la versione di protocollo arrivano dai broadcast UDP
+(6666/6667) che ogni dispositivo manda ogni pochi secondi. Un solo thread li ascolta per tutti:
+un cambio di DHCP non rompe nulla, e un dispositivo spento non riceve tentativi di
+connessione finché non torna a farsi sentire.
+
+### Avvertenze
+
+- **Una sola connessione locale per dispositivo.** Molti Tuya accettano un solo client
+  sulla 6668: un'altra integrazione locale (LocalTuya, Tuya Local in Home Assistant)
+  sugli stessi dispositivi li fa contendere. L'app e il cloud invece convivono, perché
+  usano la connessione uscente del dispositivo.
+- **Nessuna discovery Home Assistant**, per ora: HA ha già l'integrazione Tuya cloud
+  sugli stessi dispositivi e si avrebbero entità doppie.
+
+### Servizio
+
+```bash
+cp service/tuya-mqtt-bridge.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now tuya-mqtt-bridge.service
+journalctl -u tuya-mqtt-bridge -f
+```
 
 ## Test
 

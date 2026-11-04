@@ -120,3 +120,30 @@ links:
     timeout: 1.5
     retries: 1
 
+
+# ---- Tuya Wi-Fi (tuya_bridge.py) ----
+# Stesso broker del blocco mqtt: qui sopra, client e base topic propri.
+# I dispositivi e le local key stanno in tuya-devices.yaml (generato da
+# tuya_cloud.py, fuori dal repository, permessi 600).
+tuya:
+  devices_file: tuya-devices.yaml
+  base_topic: tuya
+  client_id: tuya-mqtt-bridge
+  poll_s: 60                  # rilettura completa; i cambi spontanei arrivano subito
+  heartbeat_s: 10
+  min_publish_s: 1            # raggruppa le raffiche di aggiornamenti parziali
+  retry_min_s: 10
+  retry_max_s: 300
+  publish_raw: false          # dp raw (mappe, programmi settimanali): blob base64
+  # deny_codes: [factory_reset, factor_reset, wifi_reset, data_reset, clear_energy,
+  #              sd_format, password, use_password]   # default
+  overrides:                  # correzioni al modello cloud, sopravvivono alla rigenerazione
+    # Termostati "柏益" a mezzi gradi: il modello dichiara scale 0, ma 44 vuol dire 22 °C
+    termostato-camera:
+      TempSet: {factor: 0.5}
+      TempCurrent: {factor: 0.5}
+      floorTemp: {factor: 0.5}
+    termostato-studio:
+      TempSet: {factor: 0.5}
+      TempCurrent: {factor: 0.5}
+      floorTemp: {factor: 0.5}

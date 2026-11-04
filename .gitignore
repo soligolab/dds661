@@ -88,3 +88,6 @@ config.yaml
 *.bak
 *.old
 *.old[0-9]*
+
+# Ponte Tuya: contiene le local key dei dispositivi
+tuya-devices.yaml
