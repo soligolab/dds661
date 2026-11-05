@@ -137,6 +137,7 @@ tuya:
   publish_raw: false          # dp raw (mappe, programmi settimanali): blob base64
   # deny_codes: [factory_reset, factor_reset, wifi_reset, data_reset, clear_energy,
   #              sd_format, password, use_password]   # default
+  exclude: []                 # topic da non gestire (dispositivi dismessi)
   overrides:                  # correzioni al modello cloud, sopravvivono alla rigenerazione
     # Termostati "柏益" a mezzi gradi: il modello dichiara scale 0, ma 44 vuol dire 22 °C
     termostato-camera:

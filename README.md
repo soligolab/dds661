@@ -267,6 +267,10 @@ Le correzioni al modello cloud stanno in `config.yaml`, `tuya.overrides`, e non
 nel file generato, così sopravvivono alla rigenerazione. Esempio: termostati che
 dichiarano scala 0 ma lavorano a mezzi gradi (`{factor: 0.5}`).
 
+Un dispositivo dismesso si toglie con `tuya.exclude: [<topic>]`, sempre in `config.yaml`.
+Il ponte smette di gestirlo, ma i suoi messaggi retained restano sul broker finché non si
+cancellano a mano (`mosquitto_pub -r -n -t tuya/<topic>/state`, idem `availability`).
+
 ### Indirizzi
 
 Con `ip: auto` l'indirizzo e la versione di protocollo arrivano dai broadcast UDP

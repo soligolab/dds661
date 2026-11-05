@@ -30,6 +30,7 @@ tuya:
   min_publish_s: 1       # gli energy meter mandano raffiche di aggiornamenti parziali
   publish_raw: false     # i dp raw (mappe, programmi settimanali) sono blob base64
   deny_codes: [...]      # codici mai scrivibili da MQTT (default: reset, formattazioni, password)
+  exclude: [...]         # topic da non gestire (dispositivi dismessi): resiste alla rigenerazione
   overrides:             # correzioni ai dp del modello cloud, per topic e codice;
     termostato-camera:   # stanno qui e non in tuya-devices.yaml, che si rigenera
       TempSet: {factor: 0.5}
@@ -347,8 +348,10 @@ class Bridge:
         self.mqtt_cfg = {"mqtt": m}
 
         devs = _load_yaml(devices_file or t.get("devices_file", "tuya-devices.yaml"))
+        exclude = set(t.get("exclude") or [])
         self.workers = {d["topic"]: TuyaWorker(d, self)
-                        for d in devs.get("devices") or [] if d.get("enabled", True)}
+                        for d in devs.get("devices") or []
+                        if d.get("enabled", True) and d["topic"] not in exclude}
         self.discovery = Discovery()
         self.client = None
 
