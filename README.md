@@ -16,6 +16,7 @@ Sullo stesso broker, un secondo servizio pubblica i dispositivi **Tuya Wi-Fi** i
 - `polling.py` — poller multi-dispositivo → MQTT/HA
 - `meter.py` — CLI per singolo device (lettura/scrittura/`probe`)
 - `tuya_bridge.py` — ponte Tuya Wi-Fi locale → MQTT (vedi [Ponte Tuya](#ponte-tuya-wi-fi--mqtt-tuya_bridgepy))
+- `tuya_ha.py` — discovery Home Assistant per il ponte Tuya (climate, vacuum, sensori, comandi)
 - `tuya_cloud.py` — genera `tuya-devices.yaml` (datapoint e local key) dal cloud Tuya, una tantum
 - `config.example.yaml` — configurazione di esempio, da copiare in `config.yaml`
 - `install.sh` — crea il virtualenv e installa le dipendenze
@@ -237,7 +238,9 @@ sullo stesso broker del poller Modbus, con base topic `tuya`.
 | `tuya/<topic>/state` | JSON con tutti i datapoint per codice, già scalati, più `online` e `ts` (retained) |
 | `tuya/<topic>/availability` | `online`/`offline` del singolo dispositivo (retained) |
 | `tuya/<topic>/set` | JSON `{"<codice>": valore}`: scrittura |
+| `tuya/<topic>/set/<codice>` | il solo valore (`20.5`, `true`, `strong`): scrittura, per le entità HA che non compongono JSON |
 | `tuya/<topic>/get` | qualunque payload: rilettura immediata |
+| `tuya/<topic>/vacuum` | solo aspirapolvere: `{"state": ..., "fan_speed": ...}` nel formato dell'entità `vacuum` di HA |
 
 ```bash
 mosquitto_pub -t tuya/termostato-soggiorno/set -m '{"temp_set": 20.5}'
@@ -284,8 +287,27 @@ connessione finché non torna a farsi sentire.
   sulla 6668: un'altra integrazione locale (LocalTuya, Tuya Local in Home Assistant)
   sugli stessi dispositivi li fa contendere. L'app e il cloud invece convivono, perché
   usano la connessione uscente del dispositivo.
-- **Nessuna discovery Home Assistant**, per ora: HA ha già l'integrazione Tuya cloud
-  sugli stessi dispositivi e si avrebbero entità doppie.
+
+### Home Assistant
+
+Con `home_assistant.enabled: true` (lo stesso blocco del poller; `tuya.home_assistant`
+lo sovrascrive) il ponte pubblica la discovery a ogni connessione al broker
+(`tuya_ha.py`):
+
+- termostati (categoria `wk`) → un'entità `climate`: accensione, setpoint,
+  temperatura, stato di riscaldamento e, se la modalità ha nomi veri, i preset;
+- aspirapolvere (`sd`) → un'entità `vacuum`: avvio, pausa, ritorno alla base,
+  localizza, potenza di aspirazione;
+- gli altri datapoint → sensor, binary_sensor, switch, number, select, o button per
+  i `reset_*`. Quelli con un nome italiano in `tuya_ha.NAMES` sono attivi; gli altri
+  (soglie, impostazioni dello schermo, contatori interni) nascono **disattivati** e
+  si accendono dalla UI.
+
+I `deny_codes` e i dp raw non diventano entità. `unique_id` = `tuya_<id>_<codice>`.
+`tuya.ha_exclude: [<topic>]` toglie un dispositivo dalla discovery ma non dal ponte:
+serve per le telecamere, il cui video passa comunque dall'integrazione cloud.
+Se in HA c'è anche l'integrazione Tuya cloud sugli stessi dispositivi, le entità
+sono doppie: vanno disattivate quelle del cloud.
 
 ### Servizio
 

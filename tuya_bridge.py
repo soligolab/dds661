@@ -15,6 +15,9 @@ Topic (con base_topic: tuya):
   tuya/<topic>/state           JSON con tutti i dp noti + online, ts (retained)
   tuya/<topic>/availability    online/offline del singolo dispositivo (retained)
   tuya/<topic>/set             JSON {"<code>": valore, ...} -> scrittura sul dispositivo
+  tuya/<topic>/set/<code>      valore semplice (21.5, true, strong): per le entita' HA
+                               che non sanno comporre un JSON (vacuum, number, select)
+  tuya/<topic>/vacuum          solo aspirapolvere: {"state": ...} nel formato di HA
   tuya/<topic>/get             qualunque payload -> rilettura immediata
 
 Config (blocco tuya: in config.yaml, tutto opzionale):
@@ -34,6 +37,8 @@ tuya:
   overrides:             # correzioni ai dp del modello cloud, per topic e codice;
     termostato-camera:   # stanno qui e non in tuya-devices.yaml, che si rigenera
       TempSet: {factor: 0.5}
+  home_assistant: true   # discovery HA (tuya_ha.py); default: home_assistant.enabled
+  ha_exclude: [...]      # topic senza discovery (es. telecamere gia' integrate altrove)
 
 Un dispositivo con ip: auto non riceve tentativi TCP finche' non si fa sentire
 in broadcast: quelli spenti non costano nulla.
@@ -53,6 +58,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import tinytuya
 
+import tuya_ha
 from polling import _load_yaml, _mqtt_client, _mqtt_connect
 
 log = logging.getLogger("tuya.bridge")
@@ -178,9 +184,17 @@ class TuyaWorker(threading.Thread):
         self.topic = f"{bridge.base}/{dev['topic']}"
 
     # --- MQTT -> coda
-    def command(self, payload: bytes) -> None:
+    def command(self, payload: bytes, code: Optional[str] = None) -> None:
+        """payload JSON {"<code>": valore}; con code, il payload e' il solo valore
+        (JSON se lo e', altrimenti testo: 'strong' per un enum)."""
         try:
-            req = json.loads(payload)
+            if code is None:
+                req = json.loads(payload)
+            else:
+                try:
+                    req = {code: json.loads(payload)}
+                except ValueError:
+                    req = {code: payload.decode("utf-8")}
             if not isinstance(req, dict) or not req:
                 raise ValueError("serve un oggetto JSON non vuoto")
         except Exception as e:
@@ -240,6 +254,8 @@ class TuyaWorker(threading.Thread):
                    "category": self.dev.get("category"), "online": bool(self.online),
                    "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), **self.state}
         self.bridge.publish(f"{self.topic}/state", json.dumps(payload, ensure_ascii=False))
+        if self.dev.get("category") == "sd" and self.online and self.state:
+            self.bridge.publish(f"{self.topic}/vacuum", json.dumps(tuya_ha.vacuum_state(self.state)))
 
     # --- ciclo
     def _address(self) -> Optional[Tuple[str, float]]:
@@ -339,6 +355,10 @@ class Bridge:
         self.min_publish_s = float(t.get("min_publish_s", 1))
         self.overrides: Dict[str, Dict[str, Dict[str, Any]]] = t.get("overrides") or {}
         self.deny = set(t.get("deny_codes", DEFAULT_DENY))
+        ha = cfg.get("home_assistant") or {}
+        self.ha = bool(t.get("home_assistant", ha.get("enabled", False)))
+        self.ha_prefix = str(ha.get("discovery_prefix", "homeassistant"))
+        self.ha_exclude = set(t.get("ha_exclude") or [])
 
         m = dict(cfg.get("mqtt") or {})
         self.qos = int(m.get("qos", 0))
@@ -359,14 +379,30 @@ class Bridge:
         if self.client is not None:
             self.client.publish(topic, payload, qos=self.qos, retain=True)
 
-    def _on_message(self, cli, userdata, msg) -> None:
-        parts = msg.topic.split("/")
-        w = self.workers.get(parts[-2]) if len(parts) >= 3 else None
-        if w is None:
+    def publish_discovery(self) -> None:
+        if not self.ha:
             return
-        if parts[-1] == "set":
+        n = 0
+        for topic, w in self.workers.items():
+            if topic in self.ha_exclude:
+                continue
+            for t, payload in tuya_ha.Discovery(w.dev, w.dps, self.base, self.ha_prefix,
+                                                self.deny).configs():
+                self.publish(t, payload)
+                n += 1
+        log.info("Discovery Home Assistant: %d entita'", n)
+
+    def _on_message(self, cli, userdata, msg) -> None:
+        # <base>/<topic>/set | get | set/<code>
+        parts = msg.topic[len(self.base) + 1:].split("/")
+        w = self.workers.get(parts[0])
+        if w is None or len(parts) not in (2, 3):
+            return
+        if parts[1:] == ["set"]:
             w.command(msg.payload)
-        elif parts[-1] == "get":
+        elif parts[1] == "set" and len(parts) == 3:
+            w.command(msg.payload, code=parts[2])
+        elif parts[1:] == ["get"]:
             w.refresh()
 
     def run(self) -> None:
@@ -376,7 +412,9 @@ class Bridge:
         def on_connect(cli, *args, **kwargs):
             base_on_connect(cli, *args, **kwargs)
             # a ogni (ri)connessione: le sottoscrizioni non sopravvivono a clean_session
-            cli.subscribe([(f"{self.base}/+/set", self.qos), (f"{self.base}/+/get", self.qos)])
+            cli.subscribe([(f"{self.base}/+/set", self.qos), (f"{self.base}/+/set/+", self.qos),
+                           (f"{self.base}/+/get", self.qos)])
+            self.publish_discovery()
         self.client.on_connect = on_connect
         self.client.on_message = self._on_message
         _mqtt_connect(self.client, self.mqtt_cfg)
