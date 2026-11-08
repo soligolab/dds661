@@ -35,7 +35,10 @@ IN_PF      = 0x002A  # float32
 IN_FREQ    = 0x0036  # float32
 IN_E_TOT   = 0x0100  # float32
 IN_E_POS   = 0x0102  # float32
-IN_E_REV   = 0x0103  # float32
+# L'energia esportata non e' pubblicata. La scheda del costruttore la mette a 0x0103, ma
+# 0x0103 e' la seconda meta' del float di e_pos: si leggeva mezzo valore e mezzo del
+# successivo (es. 5,8e35 kWh). Il registro giusto non e' documentato.
+IN_E_REV   = 0x0103  # float32, NON usare
 
 # ------------------------------- Dataclasses -------------------------------
 # LinkConfig e' definita in transport.py e ri-esportata qui per compatibilita'.
@@ -55,7 +58,6 @@ class Measurements:
     freq: float
     e_total: float
     e_pos: float
-    e_rev: float
 
 # -------------------------- Float <-> Registers ----------------------------
 # Alias storici verso transport.py (usati da sdm230.py e dalle app).
@@ -84,7 +86,6 @@ class DDS661:
         Measure("freq",     IN_FREQ,    "Frequency",     "Hz",  "frequency"),
         Measure("e_total",  IN_E_TOT,   "Energy Total",  "kWh", "energy"),
         Measure("e_pos",    IN_E_POS,   "Energy Import", "kWh", "energy"),
-        Measure("e_rev",    IN_E_REV,   "Energy Export", "kWh", "energy"),
     )
 
     @classmethod

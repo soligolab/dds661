@@ -120,15 +120,14 @@ check("MCM260: pubblicato come binary_sensor", bs is not None,
       str([k for k in disc if "io_soggiorno" in k]))
 if bs:
     check("MCM260: pl_on/pl_off e template senza '| float'",
-          bs.get("pl_on") == "1" and bs.get("pl_off") == "0"
+          bs.get("pl_on") == "True" and bs.get("pl_off") == "False"
           and bs["val_tpl"] == ("{% if value_json.di0 is not none %}"
                                 "{{ value_json.di0 }}{% endif %}"), json.dumps(bs)[:160])
     check("MCM260: device_class e nome", bs.get("dev_cla") == "window"
           and bs["name"] == "IO Soggiorno Finestra", bs["name"])
 io_payload = by_topic.get("dds661/io-soggiorno/state", {})
-check("MCM260: bit interi 0/1 nel payload",
-      io_payload.get("di0") == 0 and io_payload.get("di5") == 1
-      and isinstance(io_payload.get("di0"), int), str(io_payload))
+check("MCM260: bit booleani nel payload",
+      io_payload.get("di0") is False and io_payload.get("di5") is True, str(io_payload))
 
 print("\n5c) uid duplicati segnalati")
 import io as _io

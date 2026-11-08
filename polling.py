@@ -328,16 +328,16 @@ def _ha_publish_discovery(client: mqtt.Client, cfg: Dict[str, Any]) -> None:
                 "stat_t": state_topic,
                 "avty": [status_avty, value_avty],
                 "avty_mode": "all",
-                # I binary_sensor pubblicano 0/1 interi e si confrontano con pl_on/pl_off;
-                # i sensori numerici passano da '| float'.
+                # I binary_sensor pubblicano true/false: il template li rende "True"/"False"
+                # e si confrontano con pl_on/pl_off; i sensori numerici passano da '| float'.
                 "val_tpl": ("{% if value_json." + m.key + " is not none %}"
                             "{{ value_json." + m.key + cast + " }}"
                             "{% endif %}"),
                 "dev": device,
             }
             if binary:
-                cfg_payload["pl_on"] = "1"
-                cfg_payload["pl_off"] = "0"
+                cfg_payload["pl_on"] = "True"
+                cfg_payload["pl_off"] = "False"
             if m.unit:
                 cfg_payload["unit_of_meas"] = m.unit
             if m.device_class:

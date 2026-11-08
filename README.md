@@ -104,7 +104,10 @@ Per ogni device:
 ```
 <base_topic>/<slug_name_o_id>/state
 ```
-Payload JSON con: `voltage`, `current`, `p_active`, `pf`, `freq`, `e_total`, `e_pos`, `e_rev`.
+Payload JSON dei contatori: `voltage`, `current`, `p_active`, `pf`, `freq`, `e_total`, `e_pos`,
+più `e_rev` solo per l'SDM230. Il **DDS661 non pubblica `e_rev`**: la scheda del costruttore lo
+mette a `0x0103`, ma quella è la seconda metà del float di `e_pos` (`0x0102`–`0x0103`) e la
+lettura dava valori come 5,8·10³⁵ kWh. Il registro giusto non è documentato.
 
 Una misura che il dispositivo non fornisce — sonda staccata, device muto — vale **`null`**, mai
 `0`. Non è `NaN`: JSON non lo prevede, e benché `json.dumps` di Python lo emetta lo stesso come
@@ -183,7 +186,8 @@ Sedici ingressi digitali in un solo registro, un contatto per bit; ogni bit dive
 |---|---|---|
 | Ingressi digitali | **holding** `1000` | bit 0..15, bit 0 = ingresso 1 |
 
-**Logica invertita** (`invert: true`, default): bit a 1 = contatto **chiuso** → binary sensor `off`.
+**Logica invertita** (`invert: true`, default): bit a 1 = contatto **chiuso** → `false`.
+Quindi **`true` = contatto aperto** = finestra o porta aperta (per i perimetrali: contatto aperto).
 È la convenzione dei contatti magnetici usati qui, e riproduce la trasformazione
 `OpenCloseInversion` della configurazione precedente. Si disattiva con `invert: false`, globalmente
 sul device o per singolo ingresso.
@@ -201,8 +205,9 @@ sul device o per singolo ingresso.
     4: {name: "Perimetrale Nord Est", device_class: occupancy}
 ```
 
-Chiavi MQTT `di0`..`di15`, valori interi 0/1; la discovery emette `payload_on: "1"` /
-`payload_off: "0"`. Senza `inputs:` vengono pubblicati tutti e 16 i bit con nomi generici, quindi
+Chiavi MQTT `di0`..`di15`, valori **booleani JSON** `true`/`false`, mai numeri: uno 0/1 non dice
+se è un contatto o un contatore, e SWS lo rifiuta. La discovery HA emette `payload_on: "True"` /
+`payload_off: "False"`, cioè come il template rende un booleano. Senza `inputs:` vengono pubblicati tutti e 16 i bit con nomi generici, quindi
 conviene dichiarare solo quelli cablati.
 
 ## Dispositivi senza datasheet: `probe`

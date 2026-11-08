@@ -94,8 +94,9 @@ class Measure:
 def decode(m: Measure, regs):
     """Decodifica i registri grezzi secondo il codec della misura.
 
-    Ritorna float per le grandezze analogiche, int 0/1 per i bit (che in JSON devono
-    restare interi: Home Assistant confronta lo stato con payload_on/payload_off).
+    Ritorna float per le grandezze analogiche, bool per i bit: in JSON diventano
+    true/false. Uno 0/1 numerico non dice se e' un contatto o un contatore che vale 1,
+    e SWS lo rifiuta di proposito.
     """
     regs = list(regs or [])
     if len(regs) < m.count:
@@ -109,7 +110,7 @@ def decode(m: Measure, regs):
         if m.bit is None:
             raise ValueError(f"la misura '{m.key}' usa il codec 'bit' senza indicare quale bit")
         val = (int(regs[0]) >> int(m.bit)) & 1
-        return val ^ 1 if m.invert else val
+        return bool(val ^ 1 if m.invert else val)
     raise ValueError(f"codec '{m.codec}' non supportato")
 
 # ------------------------------ Config --------------------------------------
